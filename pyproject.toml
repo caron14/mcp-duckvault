@@ -3,7 +3,12 @@ name = "mcp-duckvault"
 version = "0.1.0"
 description = "DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+keywords = ["mcp", "obsidian", "duckdb", "rag", "vector-search"]
+authors = [
+    { name = "caron14", email = "caron14@users.noreply.github.com" }
+]
 dependencies = [
     "duckdb>=1.5.1",
     "mcp[cli]>=1.27.0",
@@ -12,6 +17,11 @@ dependencies = [
     "sentence-transformers>=5.4.0",
     "watchdog>=6.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/caron14/mcp-duckvault"
+Repository = "https://github.com/caron14/mcp-duckvault"
+Issues = "https://github.com/caron14/mcp-duckvault/issues"
 
 [project.scripts]
 duckvault = "mcp_duckvault.cli:main"
