@@ -37,6 +37,23 @@ duckvault /path/to/your/obsidian/vault
 - `--sync-only`: Perform a full sync of the vault and exit.
 - `-v, --verbose`: Enable verbose logging.
 
+### Excluding Files (`.vaultignore`)
+
+To exclude specific files or directories from being indexed, create a `.vaultignore` file in the root of your Obsidian Vault. The syntax is similar to `.gitignore`.
+
+By default, `.obsidian` and `.trash` are always excluded.
+
+Example `.vaultignore`:
+```text
+# Exclude specific folders
+private/
+drafts/
+
+# Exclude specific file types
+*.tmp
+*.log
+```
+
 ## MCP Tools
 
 The server exposes the following tools to AI agents:
