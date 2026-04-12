@@ -54,6 +54,100 @@ drafts/
 *.log
 ```
 
+## Registration for AI Agents
+
+This server is MCP (Model Context Protocol) compliant and can be used with the following agents after you have installed it via `uv tool install` or `pip install`.
+
+**Note**: Please specify the vault path as an **absolute path** (e.g., `/Users/username/Documents/MyVault`).
+
+### Claude Desktop (macOS)
+Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "duckvault": {
+      "command": "duckvault",
+      "args": [
+        "/absolute/path/to/your/obsidian/vault"
+      ]
+    }
+  }
+}
+```
+
+### Claude Code
+You can add the server persistently using the CLI command (recommended) or by editing the configuration file.
+
+**Using the CLI command:**
+```bash
+claude mcp add duckvault -- duckvault /absolute/path/to/your/obsidian/vault
+```
+
+**By editing the configuration file:**
+Add to `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "duckvault": {
+      "command": "duckvault",
+      "args": [
+        "/absolute/path/to/your/obsidian/vault"
+      ]
+    }
+  }
+}
+```
+
+### Gemini CLI
+You can add the server persistently using the CLI command (recommended) or by editing the configuration file.
+
+**Using the CLI command:**
+```bash
+gemini mcp add duckvault --scope user duckvault /absolute/path/to/your/obsidian/vault
+```
+
+**By editing the configuration file:**
+Add to the `mcpServers` section of your configuration file (`~/.gemini/settings.json`).
+
+```json
+{
+  "mcpServers": {
+    "duckvault": {
+      "command": "duckvault",
+      "args": [
+        "/absolute/path/to/your/obsidian/vault"
+      ]
+    }
+  }
+}
+```
+
+### GitHub Copilot (in the CLI)
+GitHub Copilot in the CLI supports MCP servers. You can add the server using the interactive `/mcp` command or by editing the configuration file.
+
+**Using the CLI command:**
+1. Start an interactive session: `copilot` (or `gh copilot chat`).
+2. Run the `/mcp add` command and follow the prompts.
+
+**By editing the configuration file:**
+Add to `~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "duckvault": {
+      "command": "duckvault",
+      "args": [
+        "/absolute/path/to/your/obsidian/vault"
+      ]
+    }
+  }
+}
+```
+```
+
 ## MCP Tools
 
 The server exposes the following tools to AI agents:
