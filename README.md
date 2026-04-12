@@ -17,7 +17,7 @@ DuckVault-MCP is an MCP (Model Context Protocol) server that provides a RAG (Ret
 uv tool install mcp-duckvault
 
 # From GitHub directly
-uv tool install git+https://github.com/username/mcp-obsidian-duckdb.git
+uv tool install git+https://github.com/caron14/mcp-obsidian-duckdb.git
 
 # From PyPI (once published)
 pip install mcp-duckvault
