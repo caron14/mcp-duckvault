@@ -11,6 +11,7 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 from .db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -73,10 +74,10 @@ class MarkdownParser:
         return [c for c in chunks if c]
 
 class VaultIndexer:
-    def __init__(self, vault_path: str, db_manager: DatabaseManager):
+    def __init__(self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None):
         self.vault_path = os.path.abspath(vault_path)
         self.db = db_manager
-        self.model = EmbeddingModel()
+        self.model = model or EmbeddingModel()
         self.parser = MarkdownParser()
         self.exclude_patterns = self._load_exclude_patterns()
 
@@ -100,15 +101,22 @@ class VaultIndexer:
 
     def _is_excluded(self, rel_path: str) -> bool:
         """Check if a relative path matches any exclusion patterns."""
-        path_parts = rel_path.split(os.sep)
+        # Normalize slashes for matching
+        norm_path = rel_path.replace(os.sep, "/")
+        path_parts = norm_path.split("/")
+        
         for pattern in self.exclude_patterns:
-            # Match against each part of the path
-            for part in path_parts:
-                if fnmatch.fnmatch(part, pattern):
-                    return True
-            # Also match against the full relative path
-            if fnmatch.fnmatch(rel_path, pattern):
+            # Handle patterns like "private/" by stripping trailing slash
+            clean_pattern = pattern.replace(os.sep, "/").rstrip("/")
+            
+            # 1. Match against full relative path
+            if fnmatch.fnmatch(norm_path, clean_pattern) or fnmatch.fnmatch(norm_path, f"{clean_pattern}/*"):
                 return True
+                
+            # 2. Match against each part of the path (for simple patterns like ".obsidian")
+            for part in path_parts:
+                if fnmatch.fnmatch(part, clean_pattern):
+                    return True
         return False
 
     def get_file_hash(self, file_path: str) -> str:
@@ -119,7 +127,7 @@ class VaultIndexer:
             hasher.update(buf)
         return hasher.hexdigest()
 
-    def index_file(self, file_path: str):
+    def index_file(self, file_path: str, show_log: bool = True):
         """Index a single markdown file."""
         if not file_path.endswith(".md"):
             return
@@ -128,7 +136,8 @@ class VaultIndexer:
         if self._is_excluded(rel_path):
             return
 
-        logger.info(f"Indexing file: {rel_path}")
+        if show_log:
+            logger.info(f"Indexing file: {rel_path}")
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -142,7 +151,8 @@ class VaultIndexer:
             ).fetchone()
             
             if existing and existing[0] == file_hash:
-                logger.debug(f"File unchanged: {rel_path}")
+                if show_log:
+                    logger.debug(f"File unchanged: {rel_path}")
                 return
 
             # File changed or new, proceed to index
@@ -175,7 +185,8 @@ class VaultIndexer:
                         )
                 
                 self.db.conn.execute("COMMIT")
-                logger.info(f"Successfully indexed {rel_path} ({len(chunks)} chunks)")
+                if show_log:
+                    logger.info(f"Successfully indexed {rel_path} ({len(chunks)} chunks)")
             except Exception as e:
                 self.db.conn.execute("ROLLBACK")
                 logger.error(f"Error during transaction for {rel_path}: {e}")
@@ -194,13 +205,14 @@ class VaultIndexer:
         self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
 
     def full_sync(self):
-        """Perform a full sync of the vault."""
+        """Perform a full sync of the vault with progress bar."""
         logger.info("Starting full sync...")
         
         # Get all files in DB to find deletions
         db_files = set(row[0] for row in self.db.conn.execute("SELECT path FROM documents").fetchall())
-        current_files = set()
+        current_files = []
 
+        # First pass: collect all files to index
         for root, dirs, files in os.walk(self.vault_path):
             # filter dirs in-place to avoid traversing excluded directories
             dirs[:] = [d for d in dirs if not self._is_excluded(os.path.relpath(os.path.join(root, d), self.vault_path))]
@@ -210,11 +222,17 @@ class VaultIndexer:
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, self.vault_path)
                     if not self._is_excluded(rel_path):
-                        current_files.add(rel_path)
-                        self.index_file(full_path)
+                        current_files.append((full_path, rel_path))
+        
+        # Second pass: index files with progress bar
+        if current_files:
+            logger.info(f"Found {len(current_files)} markdown files. Syncing...")
+            for full_path, rel_path in tqdm(current_files, desc="Syncing Vault", unit="file"):
+                self.index_file(full_path, show_log=False)
         
         # Remove files that no longer exist
-        deleted_files = db_files - current_files
+        current_rel_paths = set(p for _, p in current_files)
+        deleted_files = db_files - current_rel_paths
         for rel_path in deleted_files:
             logger.info(f"Removing deleted file: {rel_path}")
             self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
