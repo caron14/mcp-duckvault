@@ -15,3 +15,5 @@ REQUIREMENT.md
 TODO.md
 USAGE.md
 VALIDATION.md
+vault.db
+vault.db.wal

@@ -1,6 +1,6 @@
 [project]
 name = "mcp-duckvault"
-version = "0.1.0"
+version = "0.2.0"
 description = "DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server"
 readme = "README.md"
 license = { text = "MIT" }
@@ -10,12 +10,21 @@ authors = [
     { name = "caron14", email = "caron14@users.noreply.github.com" }
 ]
 dependencies = [
+    "click>=8.0.0",
     "duckdb>=1.5.1",
     "mcp[cli]>=1.27.0",
     "pandas>=3.0.2",
     "pyyaml>=6.0.3",
     "sentence-transformers>=5.4.0",
+    "tqdm>=4.66.0",
     "watchdog>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0.0",
+    "isort>=5.13.0",
+    "pytest>=8.0.0",
 ]
 
 [project.urls]
@@ -25,6 +34,14 @@ Issues = "https://github.com/caron14/mcp-duckvault/issues"
 
 [project.scripts]
 duckvault = "mcp_duckvault.cli:main"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 100
 
 [build-system]
 requires = ["hatchling"]

@@ -5,8 +5,10 @@ DuckVault-MCP is an MCP (Model Context Protocol) server that provides a RAG (Ret
 ## Features
 
 - **Local Vector Search**: Uses `sentence-transformers` (`intfloat/multilingual-e5-small`) for local embeddings.
+- **Obsidian URI Links**: Includes direct links to open notes in Obsidian from search results.
 - **Incremental Indexing**: Uses MD5 hashing to only update modified files.
 - **Real-time Monitoring**: Uses `watchdog` to index changes as you edit your notes.
+- **Progress Indicators**: Displays a progress bar during initial indexing for large vaults.
 - **Fast Search**: Leverages DuckDB with the `vss` extension and HNSW indexing for millisecond-level retrieval.
 - **MCP Compatible**: Works seamlessly with AI agents like Claude Code or Cursor.
 
@@ -31,11 +33,38 @@ Start the MCP server by pointing it to your Obsidian Vault:
 duckvault /path/to/your/obsidian/vault
 ```
 
-### Options
-
-- `--db-path`: Path to the DuckDB file (default: `vault.db`).
+**Options**
+- `--db-path`: Path to the DuckDB file (default: `~/.duckvault/vault.db`).
 - `--sync-only`: Perform a full sync of the vault and exit.
 - `-v, --verbose`: Enable verbose logging.
+
+### CLI Examples
+
+**Basic usage:**
+```bash
+duckvault /path/to/your/obsidian/vault
+```
+
+**Custom database path:**
+Specify a custom location for the DuckDB index file.
+```bash
+duckvault /path/to/your/obsidian/vault --db-path ./vault_index.db
+```
+
+**Sync only (Headless mode):**
+Index all files and exit without starting the MCP server.
+```bash
+duckvault /path/to/your/obsidian/vault --sync-only
+```
+
+### Example Queries for AI Agents
+
+Once connected, you can interact with your vault using natural language through an AI agent:
+
+- **Semantic Search**: "Find notes about machine learning projects and list the key concepts mentioned."
+- **Filtered Search**: "Search for notes about 'meeting' with the tag #work and summarize the action items."
+- **Stay Updated**: "What are the most important notes I've worked on in the last 3 days?"
+- **Cross-Note Analysis**: "Based on my recent notes about 'React', how has my understanding of Hooks evolved?"
 
 ### Excluding Files (`.vaultignore`)
 
@@ -152,7 +181,7 @@ Add to `~/.copilot/mcp-config.json`:
 
 The server exposes the following tools to AI agents:
 
-1. `search_notes(query: str, tag: Optional[str] = None)`: Search for relevant notes using natural language.
+1. `search_notes(query: str, tag: Optional[str] = None, limit: int = 5)`: Search for relevant notes using natural language.
 2. `list_recent_notes(days: int = 7)`: List notes that were recently updated.
 
 ## License
