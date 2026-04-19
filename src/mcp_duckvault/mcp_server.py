@@ -41,7 +41,8 @@ def create_mcp_server(db_path: str) -> FastMCP:
                     1 - (c.embedding <=> ?::FLOAT[]) as similarity,
                     d.metadata
                 FROM chunks c
-                JOIN documents d ON c.document_path = d.path
+                JOIN documents d
+                    ON c.document_path = d.path
                 WHERE 1=1
             """
             params = [query_vec]
