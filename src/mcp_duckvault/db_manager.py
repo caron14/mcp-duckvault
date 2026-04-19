@@ -104,7 +104,9 @@ class DatabaseManager:
         # Create HNSW index for vector search if it doesn't exist
         try:
             # First, check if index exists in DuckDB system tables
-            existing = self.conn.execute("SELECT * FROM duckdb_indexes() WHERE index_name = 'chunk_vec_idx'").fetchone()
+            existing = self.conn.execute(
+                "SELECT * FROM duckdb_indexes() WHERE index_name = 'chunk_vec_idx'"
+            ).fetchone()
             if not existing:
                 self.conn.execute("""
                     CREATE INDEX chunk_vec_idx ON chunks USING HNSW (embedding) WITH (metric = 'cosine');

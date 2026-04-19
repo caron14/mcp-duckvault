@@ -1,9 +1,12 @@
 """Unit tests for the VaultIndexer and MarkdownParser classes."""
 
 import os
+
 import pytest
-from mcp_duckvault.indexer import MarkdownParser, VaultIndexer
+
 from mcp_duckvault.db_manager import DatabaseManager
+from mcp_duckvault.indexer import MarkdownParser, VaultIndexer
+
 
 def test_markdown_parser_frontmatter():
     """Tests extraction of YAML frontmatter from Markdown content."""
@@ -12,12 +15,14 @@ def test_markdown_parser_frontmatter():
     assert metadata == {"title": "Test Note", "tags": ["tag1", "tag2"]}
     assert body.strip() == "# Header\nContent"
 
+
 def test_markdown_parser_no_frontmatter():
     """Tests Markdown parsing when no frontmatter is present."""
     content = "# Header\nContent"
     metadata, body = MarkdownParser.extract_metadata(content)
     assert metadata == {}
     assert body.strip() == "# Header\nContent"
+
 
 def test_markdown_chunk_by_headers():
     """Tests chunking of Markdown content by H1-H3 headers."""
@@ -36,6 +41,7 @@ Content 4"""
     assert chunks[2].startswith("### H3")
     assert "#### H4" in chunks[2]
 
+
 def test_vault_indexer_exclusion(tmp_path):
     """Tests default exclusion patterns in the VaultIndexer."""
     vault_path = tmp_path / "vault"
@@ -45,13 +51,14 @@ def test_vault_indexer_exclusion(tmp_path):
     (vault_path / ".obsidian" / "config").write_text("config")
     (vault_path / ".trash").mkdir()
     (vault_path / ".trash" / "deleted.md").write_text("deleted")
-    
+
     db_manager = DatabaseManager(":memory:")
     indexer = VaultIndexer(str(vault_path), db_manager)
-    
+
     assert indexer._is_excluded(".obsidian/config")
     assert indexer._is_excluded(".trash/deleted.md")
     assert not indexer._is_excluded("note.md")
+
 
 def test_vault_ignore_exclusion(tmp_path):
     """Tests custom exclusion patterns from .vaultignore."""
@@ -62,10 +69,10 @@ def test_vault_ignore_exclusion(tmp_path):
     (vault_path / "private" / "secret.md").write_text("secret")
     (vault_path / "app.log").write_text("log")
     (vault_path / "note.md").write_text("content")
-    
+
     db_manager = DatabaseManager(":memory:")
     indexer = VaultIndexer(str(vault_path), db_manager)
-    
+
     assert indexer._is_excluded("private/secret.md")
     assert indexer._is_excluded("app.log")
     assert not indexer._is_excluded("note.md")

@@ -1,9 +1,12 @@
 """Unit tests for the search and tag filtering logic."""
 
-import pytest
 import json
 import urllib.parse
+
+import pytest
+
 from mcp_duckvault.db_manager import DatabaseManager
+
 
 def test_tag_filtering_logic():
     """Tests the SQL logic for filtering documents by tags in various formats."""
@@ -11,10 +14,10 @@ def test_tag_filtering_logic():
     # d.metadata->'$.tags' ? ? OR d.metadata->'$.tag' = ? ...
     # We'll test if the SQL logic we implemented matches expectations
     # But since it's SQL, we should ideally run it against a real DuckDB
-    
+
     db = DatabaseManager(":memory:")
     db.initialize_schema()
-    
+
     # Insert test data
     test_data = [
         ("path1.md", "hash1", {"tags": ["work", "project"]}, "content1"),
@@ -22,13 +25,17 @@ def test_tag_filtering_logic():
         ("path3.md", "hash3", {"tags": "work urgent"}, "content3"),
         ("path4.md", "hash4", {"tags": ["home"]}, "content4"),
     ]
-    
+
     for path, md5, meta, content in test_data:
-        db.conn.execute("INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)", 
-                        (path, md5, json.dumps(meta)))
-        db.conn.execute("INSERT INTO chunks (chunk_id, document_path, content, embedding) VALUES (?, ?, ?, ?)",
-                        (path, path, content, [0.1]*384))
-    
+        db.conn.execute(
+            "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
+            (path, md5, json.dumps(meta)),
+        )
+        db.conn.execute(
+            "INSERT INTO chunks (chunk_id, document_path, content, embedding) VALUES (?, ?, ?, ?)",
+            (path, path, content, [0.1] * 384),
+        )
+
     def search_with_tag(tag):
         sql = """
             SELECT d.path
@@ -53,6 +60,7 @@ def test_tag_filtering_logic():
     assert "path4.md" in search_with_tag("home")
     assert "path1.md" not in search_with_tag("personal")
 
+
 def test_obsidian_uri_generation():
     """Tests the generation of Obsidian URIs for search results."""
     vault_name = "My Vault"
@@ -61,6 +69,8 @@ def test_obsidian_uri_generation():
     encoded_path = urllib.parse.quote(path)
     uri = f"obsidian://open?vault={encoded_vault}&file={encoded_path}"
     assert "My%20Vault" in uri
-    assert "Folder/Note%20Name.md" in uri or "Folder/Note%20Name.md" in uri # depending on quote behavior
+    assert (
+        "Folder/Note%20Name.md" in uri or "Folder/Note%20Name.md" in uri
+    )  # depending on quote behavior
     # urllib.parse.quote by default doesn't quote slashes.
     assert uri == "obsidian://open?vault=My%20Vault&file=Folder/Note%20Name.md"
