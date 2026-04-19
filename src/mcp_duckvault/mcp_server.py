@@ -15,7 +15,20 @@ logger = logging.getLogger(__name__)
 def create_mcp_server(
     vault_path: str, db_manager: DatabaseManager, model: EmbeddingModel
 ) -> FastMCP:
-    """Create and configure the FastMCP server instance."""
+    """Creates and configures the FastMCP server instance for DuckVault.
+
+    This function sets up the MCP server with two primary tools:
+    `search_notes` and `list_recent_notes`. It also manages the database
+    connections for these tools.
+
+    Args:
+        vault_path (str): The absolute path to the Obsidian Vault.
+        db_manager (DatabaseManager): The database manager instance.
+        model (EmbeddingModel): The embedding model instance for similarity search.
+
+    Returns:
+        FastMCP: A configured FastMCP server instance.
+    """
     mcp = FastMCP("DuckVault-MCP")
 
     vault_name = os.path.basename(os.path.abspath(vault_path))
@@ -23,13 +36,21 @@ def create_mcp_server(
 
     @mcp.tool()
     async def search_notes(query: str, tag: Optional[str] = None, limit: int = 5) -> str:
-        """
-        Search for notes in the vault using vector similarity.
+        """Searches for notes in the vault using vector similarity.
+
+        Encodes the natural language query into a vector and performs an
+        HNSW similarity search against the indexed chunks in DuckDB.
+        Optional tag filtering is supported for various frontmatter formats.
 
         Args:
-            query: The natural language search query.
-            tag: Optional tag to filter by (searches in document metadata).
-            limit: Number of results to return (default 5).
+            query (str): The natural language search query.
+            tag (Optional[str]): A tag to filter notes by. Searches in the
+                'tags' or 'tag' fields of the document metadata.
+            limit (int): The maximum number of results to return. Defaults to 5.
+
+        Returns:
+            str: A formatted Markdown string containing the search results,
+                including Obsidian URIs and content snippets.
         """
         logger.info(f"Searching notes for query: '{query}', tag: {tag}")
 
@@ -101,11 +122,17 @@ def create_mcp_server(
 
     @mcp.tool()
     async def list_recent_notes(days: int = 7) -> str:
-        """
-        List notes that have been modified within the last N days.
+        """Lists notes that have been modified within a specific timeframe.
+
+        Queries the database for documents whose 'updated_at' timestamp
+        falls within the last N days.
 
         Args:
-            days: Number of days to look back (default 7).
+            days (int): The number of days to look back. Defaults to 7.
+
+        Returns:
+            str: A formatted Markdown string listing the recent notes
+                with Obsidian URIs and their last updated timestamps.
         """
         logger.info(f"Listing notes modified in the last {days} days")
 

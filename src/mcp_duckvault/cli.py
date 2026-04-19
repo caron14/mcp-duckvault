@@ -11,10 +11,9 @@ from .mcp_server import create_mcp_server
 
 
 def setup_logging(verbose: bool):
-    """
-    Configure the logging system for the entire application.
+    """Configures the logging system for the application.
 
-    NOTE:
+    Note:
         All logs are directed to `stderr` instead of `stdout`.
         This is because the MCP (Model Context Protocol) server
         uses stdout for its JSON-RPC communication with the LLM client.
@@ -30,7 +29,13 @@ def setup_logging(verbose: bool):
 
 
 def get_default_paths():
-    """Get default paths for database and model cache."""
+    """Gets default paths for the database and model cache.
+
+    Returns:
+        tuple[str, str]: A tuple containing:
+            - The default path to the DuckDB database file.
+            - The default path to the sentence-transformers model cache.
+    """
     base_dir = Path.home() / ".duckvault"
     base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,10 +53,17 @@ def get_default_paths():
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def main(vault_path: str, db_path: str, sync_only: bool, verbose: bool):
-    """
-    DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server.
+    """DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server.
 
-    VAULT_PATH: The absolute path to your Obsidian Vault.
+    This is the main entry point for the CLI. It handles initialization,
+    full synchronization of the vault, background monitoring, and
+    starting the MCP server.
+
+    Args:
+        vault_path (str): The absolute path to the Obsidian Vault.
+        db_path (str): The path to the DuckDB database file.
+        sync_only (bool): If True, exits after performing a full sync.
+        verbose (bool): If True, enables verbose (DEBUG) logging.
     """
     setup_logging(verbose)
     logger = logging.getLogger("mcp_duckvault")

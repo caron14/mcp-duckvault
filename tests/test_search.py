@@ -1,9 +1,12 @@
+"""Unit tests for the search and tag filtering logic."""
+
 import pytest
 import json
 import urllib.parse
 from mcp_duckvault.db_manager import DatabaseManager
 
 def test_tag_filtering_logic():
+    """Tests the SQL logic for filtering documents by tags in various formats."""
     # Test cases for frontmatter tag formats
     # d.metadata->'$.tags' ? ? OR d.metadata->'$.tag' = ? ...
     # We'll test if the SQL logic we implemented matches expectations
@@ -51,12 +54,13 @@ def test_tag_filtering_logic():
     assert "path1.md" not in search_with_tag("personal")
 
 def test_obsidian_uri_generation():
+    """Tests the generation of Obsidian URIs for search results."""
     vault_name = "My Vault"
     path = "Folder/Note Name.md"
     encoded_vault = urllib.parse.quote(vault_name)
     encoded_path = urllib.parse.quote(path)
     uri = f"obsidian://open?vault={encoded_vault}&file={encoded_path}"
     assert "My%20Vault" in uri
-    assert "Folder/Note%20Name.md" in uri or "Folder%20Note%20Name.md" in uri # depending on quote behavior
+    assert "Folder/Note%20Name.md" in uri or "Folder/Note%20Name.md" in uri # depending on quote behavior
     # urllib.parse.quote by default doesn't quote slashes.
     assert uri == "obsidian://open?vault=My%20Vault&file=Folder/Note%20Name.md"

@@ -1,21 +1,26 @@
+"""Unit tests for the VaultIndexer and MarkdownParser classes."""
+
 import os
 import pytest
 from mcp_duckvault.indexer import MarkdownParser, VaultIndexer
 from mcp_duckvault.db_manager import DatabaseManager
 
 def test_markdown_parser_frontmatter():
+    """Tests extraction of YAML frontmatter from Markdown content."""
     content = "---\ntitle: Test Note\ntags: [tag1, tag2]\n---\n# Header\nContent"
     metadata, body = MarkdownParser.extract_metadata(content)
     assert metadata == {"title": "Test Note", "tags": ["tag1", "tag2"]}
     assert body.strip() == "# Header\nContent"
 
 def test_markdown_parser_no_frontmatter():
+    """Tests Markdown parsing when no frontmatter is present."""
     content = "# Header\nContent"
     metadata, body = MarkdownParser.extract_metadata(content)
     assert metadata == {}
     assert body.strip() == "# Header\nContent"
 
 def test_markdown_chunk_by_headers():
+    """Tests chunking of Markdown content by H1-H3 headers."""
     content = """# H1
 Content 1
 ## H2
@@ -32,6 +37,7 @@ Content 4"""
     assert "#### H4" in chunks[2]
 
 def test_vault_indexer_exclusion(tmp_path):
+    """Tests default exclusion patterns in the VaultIndexer."""
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
     (vault_path / ".obsidian").mkdir()
@@ -48,6 +54,7 @@ def test_vault_indexer_exclusion(tmp_path):
     assert not indexer._is_excluded("note.md")
 
 def test_vault_ignore_exclusion(tmp_path):
+    """Tests custom exclusion patterns from .vaultignore."""
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
     (vault_path / ".vaultignore").write_text("private/\n*.log")

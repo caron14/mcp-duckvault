@@ -20,19 +20,51 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingModel:
+    """Wrapper for the sentence-transformers model to generate text embeddings.
+
+    This class handles the loading of the embedding model and provides a
+    consistent interface for encoding text into vectors with the appropriate
+    prefixes required by the E5 model family.
+
+    Attributes:
+        model (SentenceTransformer): The underlying sentence-transformers model.
+        model_name (str): The name/ID of the model being used.
+    """
+
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small"):
+        """Initializes the EmbeddingModel with a specific pre-trained model.
+
+        Args:
+            model_name (str): The name of the model to load from HuggingFace
+                or a local path. Defaults to "intfloat/multilingual-e5-small".
+        """
         logger.info(f"Loading embedding model: {model_name}")
         self.model = SentenceTransformer(model_name)
         self.model_name = model_name
 
     @property
     def dimension(self) -> int:
-        """Get the embedding dimension of the model."""
+        """Gets the embedding dimension of the model.
+
+        Returns:
+            int: The size of the vector produced by the model.
+        """
         return self.model.get_sentence_embedding_dimension()
 
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
-        """Encode a list of texts into embeddings.
-        Adds 'query: ' or 'passage: ' prefix as required by e5 models.
+        """Encodes a list of strings into a list of vector embeddings.
+
+        Adds 'query: ' prefix for search queries or 'passage: ' prefix for
+        documents being indexed, as required by E5-style models.
+
+        Args:
+            texts (List[str]): A list of text strings to encode.
+            is_query (bool): Whether the text is a search query. If False,
+                it's treated as a passage for indexing. Defaults to False.
+
+        Returns:
+            List[List[float]]: A list of embeddings, where each embedding
+                is a list of floats.
         """
         prefix = "query: " if is_query else "passage: "
         prefixed_texts = [prefix + text for text in texts]
@@ -41,9 +73,24 @@ class EmbeddingModel:
 
 
 class MarkdownParser:
+    """Utility class for parsing Markdown content.
+
+    Provides static methods for extracting metadata (YAML frontmatter) and
+    splitting content into logical chunks based on headers.
+    """
+
     @staticmethod
     def extract_metadata(content: str) -> tuple[Dict[str, Any], str]:
-        """Extract YAML frontmatter and the remaining content."""
+        """Extracts YAML frontmatter and returns it along with the remaining body.
+
+        Args:
+            content (str): The full content of a Markdown file.
+
+        Returns:
+            tuple[Dict[str, Any], str]: A tuple containing:
+                - A dictionary of extracted metadata.
+                - The remaining content after the frontmatter.
+        """
         frontmatter = {}
         remaining_content = content
 
@@ -59,7 +106,17 @@ class MarkdownParser:
 
     @staticmethod
     def chunk_by_headers(content: str) -> List[str]:
-        """Chunk markdown content based on H1-H3 headers."""
+        """Chunks Markdown content based on H1, H2, or H3 headers.
+
+        Each chunk starts with a header and includes all text until the
+        next header of the same or higher level is encountered.
+
+        Args:
+            content (str): The Markdown body content to chunk.
+
+        Returns:
+            List[str]: A list of text chunks.
+        """
         # Split by H1-H3: lines starting with #, ##, or ###
         # We keep the header in the chunk
         chunks = []
@@ -84,9 +141,30 @@ class MarkdownParser:
 
 
 class VaultIndexer:
+    """Orchestrates the indexing of an Obsidian Vault into DuckDB.
+
+    This class handles file discovery, change detection using MD5 hashes,
+    parsing, embedding generation, and database updates for a vault.
+
+    Attributes:
+        vault_path (str): Absolute path to the Obsidian Vault.
+        db (DatabaseManager): The database manager instance.
+        model (EmbeddingModel): The embedding model instance.
+        parser (MarkdownParser): The Markdown parser instance.
+        exclude_patterns (List[str]): List of glob patterns to exclude from indexing.
+    """
+
     def __init__(
         self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None
     ):
+        """Initializes the VaultIndexer.
+
+        Args:
+            vault_path (str): The path to the Obsidian Vault.
+            db_manager (DatabaseManager): An initialized DatabaseManager.
+            model (Optional[EmbeddingModel]): An EmbeddingModel instance.
+                If not provided, a default one will be created.
+        """
         self.vault_path = os.path.abspath(vault_path)
         self.db = db_manager
         self.model = model or EmbeddingModel()
@@ -94,7 +172,11 @@ class VaultIndexer:
         self.exclude_patterns = self._load_exclude_patterns()
 
     def _load_exclude_patterns(self) -> List[str]:
-        """Load exclude patterns from .vaultignore file or use defaults."""
+        """Loads exclusion patterns from .vaultignore or uses defaults.
+
+        Returns:
+            List[str]: A list of glob patterns to ignore.
+        """
         ignore_file = os.path.join(self.vault_path, ".vaultignore")
         patterns = [".obsidian", ".trash"]  # Default exclusions
 
@@ -112,7 +194,14 @@ class VaultIndexer:
         return list(set(patterns))
 
     def _is_excluded(self, rel_path: str) -> bool:
-        """Check if a relative path matches any exclusion patterns."""
+        """Checks if a given relative path matches any exclusion patterns.
+
+        Args:
+            rel_path (str): The relative path of the file or directory.
+
+        Returns:
+            bool: True if the path should be excluded, False otherwise.
+        """
         # Normalize slashes for matching
         norm_path = rel_path.replace(os.sep, "/")
         path_parts = norm_path.split("/")
@@ -134,7 +223,14 @@ class VaultIndexer:
         return False
 
     def get_file_hash(self, file_path: str) -> str:
-        """Calculate MD5 hash of a file."""
+        """Calculates the MD5 hash of a file's content.
+
+        Args:
+            file_path (str): The full path to the file.
+
+        Returns:
+            str: The MD5 hex digest.
+        """
         hasher = hashlib.md5()
         with open(file_path, "rb") as f:
             buf = f.read()
@@ -142,7 +238,16 @@ class VaultIndexer:
         return hasher.hexdigest()
 
     def index_file(self, file_path: str, show_log: bool = True):
-        """Index a single markdown file."""
+        """Indexes a single Markdown file into the database.
+
+        Checks if the file is a Markdown file, if it's excluded, and if
+        it has changed since the last indexing. If changed, it parses
+        the file, generates embeddings for its chunks, and updates the database.
+
+        Args:
+            file_path (str): The full path to the Markdown file.
+            show_log (bool): Whether to log the indexing progress. Defaults to True.
+        """
         if not file_path.endswith(".md"):
             return
 
@@ -205,7 +310,11 @@ class VaultIndexer:
             logger.error(f"Failed to index file {file_path}: {e}")
 
     def delete_file(self, file_path: str):
-        """Remove a file from the index."""
+        """Removes a file and its chunks from the index.
+
+        Args:
+            file_path (str): The full path to the file to be removed.
+        """
         rel_path = os.path.relpath(file_path, self.vault_path)
         if self._is_excluded(rel_path):
             return
@@ -215,7 +324,11 @@ class VaultIndexer:
         self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
 
     def full_sync(self):
-        """Perform a full sync of the vault with progress bar."""
+        """Performs a full synchronization of the vault.
+
+        Scans all Markdown files in the vault, indexes new or modified ones,
+        and removes entries for files that no longer exist on disk.
+        """
         logger.info("Starting full sync...")
 
         # Get all files in DB to find deletions
@@ -258,22 +371,40 @@ class VaultIndexer:
 
 
 class VaultWatchdogHandler(FileSystemEventHandler):
+    """Event handler for monitoring filesystem changes in the vault.
+
+    Dispatches modified, created, deleted, and moved events to the
+    VaultIndexer for real-time incremental updates.
+
+    Attributes:
+        indexer (VaultIndexer): The indexer instance to handle changes.
+    """
+
     def __init__(self, indexer: VaultIndexer):
+        """Initializes the VaultWatchdogHandler.
+
+        Args:
+            indexer (VaultIndexer): The indexer to use for incremental updates.
+        """
         self.indexer = indexer
 
     def on_modified(self, event):
+        """Called when a file or directory is modified."""
         if not event.is_directory and event.src_path.endswith(".md"):
             self.indexer.index_file(event.src_path)
 
     def on_created(self, event):
+        """Called when a file or directory is created."""
         if not event.is_directory and event.src_path.endswith(".md"):
             self.indexer.index_file(event.src_path)
 
     def on_deleted(self, event):
+        """Called when a file or directory is deleted."""
         if not event.is_directory and event.src_path.endswith(".md"):
             self.indexer.delete_file(event.src_path)
 
     def on_moved(self, event):
+        """Called when a file or directory is moved or renamed."""
         if not event.is_directory:
             if event.src_path.endswith(".md"):
                 self.indexer.delete_file(event.src_path)
@@ -282,7 +413,15 @@ class VaultWatchdogHandler(FileSystemEventHandler):
 
 
 def start_watcher(vault_path: str, indexer: VaultIndexer):
-    """Start the watchdog observer to monitor the vault."""
+    """Starts the watchdog observer to monitor the vault for changes.
+
+    Args:
+        vault_path (str): The path to the vault to monitor.
+        indexer (VaultIndexer): The indexer to handle filesystem events.
+
+    Returns:
+        Observer: The started watchdog observer instance.
+    """
     event_handler = VaultWatchdogHandler(indexer)
     observer = Observer()
     observer.schedule(event_handler, vault_path, recursive=True)

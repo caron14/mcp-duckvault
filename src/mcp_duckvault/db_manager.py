@@ -6,12 +6,37 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
+    """Manages the DuckDB connection and schema for the vault index.
+
+    This class handles the lifecycle of the DuckDB database, including
+    connecting, initializing the schema (tables and indices), and closing
+    the connection. It specifically manages the integration with the DuckDB
+    vss extension for vector search.
+
+    Attributes:
+        db_path (str): The file path to the DuckDB database.
+        conn (duckdb.DuckDBPyConnection): The active DuckDB connection object.
+    """
+
     def __init__(self, db_path: str = "vault.db"):
+        """Initializes the DatabaseManager with the given database path.
+
+        Args:
+            db_path (str): The path to the DuckDB database file. Defaults to "vault.db".
+        """
         self.db_path = db_path
         self.conn = None
 
     def connect(self):
-        """Establish a connection to DuckDB and ensure the vss extension is loaded."""
+        """Establishes a connection to DuckDB and loads the vss extension.
+
+        This method connects to the database, installs and loads the 'vss'
+        extension if necessary, and enables experimental HNSW persistence
+        to ensure vector indices are saved to disk.
+
+        Raises:
+            duckdb.Error: If the connection or extension loading fails.
+        """
         logger.info(f"Connecting to DuckDB at {self.db_path}")
         self.conn = duckdb.connect(self.db_path)
 
@@ -28,12 +53,18 @@ class DatabaseManager:
             logger.debug(f"Could not set hnsw_enable_experimental_persistence: {e}")
 
     def initialize_schema(self, embedding_dim: int = 384):
-        """
-        Create the necessary tables if they don't exist.
-        
+        """Creates the necessary tables and indices if they do not exist.
+
+        Initializes 'system_config', 'documents', and 'chunks' tables.
+        Also creates an HNSW index on the 'embedding' column in the 'chunks'
+        table for efficient vector similarity search.
+
         Args:
             embedding_dim (int): The dimension of the vector embeddings.
-                                Defaults to 384 (multilingual-e5-small).
+                Defaults to 384 (matching intfloat/multilingual-e5-small).
+
+        Raises:
+            duckdb.Error: If table or index creation fails.
         """
         if not self.conn:
             self.connect()
@@ -87,7 +118,7 @@ class DatabaseManager:
         logger.info("Schema initialization complete")
 
     def close(self):
-        """Close the database connection."""
+        """Closes the active database connection."""
         if self.conn:
             self.conn.close()
             logger.info("Database connection closed")
