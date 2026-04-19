@@ -1,20 +1,23 @@
-import os
+import fnmatch
 import hashlib
+import json
 import logging
-import yaml
+import os
 import re
 import uuid
-import json
-import fnmatch
-from typing import List, Dict, Any, Optional
 from datetime import datetime
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from typing import Any, Dict, List, Optional
+
+import yaml
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
 from .db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
 
 class EmbeddingModel:
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small"):
@@ -31,21 +34,22 @@ class EmbeddingModel:
         embeddings = self.model.encode(prefixed_texts)
         return embeddings.tolist()
 
+
 class MarkdownParser:
     @staticmethod
     def extract_metadata(content: str) -> tuple[Dict[str, Any], str]:
         """Extract YAML frontmatter and the remaining content."""
         frontmatter = {}
         remaining_content = content
-        
+
         match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
         if match:
             try:
                 frontmatter = yaml.safe_load(match.group(1)) or {}
-                remaining_content = content[match.end():]
+                remaining_content = content[match.end() :]
             except Exception as e:
                 logger.warning(f"Failed to parse YAML frontmatter: {e}")
-                
+
         return frontmatter, remaining_content
 
     @staticmethod
@@ -56,9 +60,9 @@ class MarkdownParser:
         chunks = []
         lines = content.split("\n")
         current_chunk = []
-        
+
         header_pattern = re.compile(r"^#{1,3}\s+")
-        
+
         for line in lines:
             if header_pattern.match(line) and current_chunk:
                 # New header found, save current chunk
@@ -66,15 +70,18 @@ class MarkdownParser:
                 current_chunk = [line]
             else:
                 current_chunk.append(line)
-        
+
         if current_chunk:
             chunks.append("\n".join(current_chunk).strip())
-            
+
         # Filter out empty chunks
         return [c for c in chunks if c]
 
+
 class VaultIndexer:
-    def __init__(self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None):
+    def __init__(
+        self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None
+    ):
         self.vault_path = os.path.abspath(vault_path)
         self.db = db_manager
         self.model = model or EmbeddingModel()
@@ -84,8 +91,8 @@ class VaultIndexer:
     def _load_exclude_patterns(self) -> List[str]:
         """Load exclude patterns from .vaultignore file or use defaults."""
         ignore_file = os.path.join(self.vault_path, ".vaultignore")
-        patterns = [".obsidian", ".trash"] # Default exclusions
-        
+        patterns = [".obsidian", ".trash"]  # Default exclusions
+
         if os.path.exists(ignore_file):
             try:
                 with open(ignore_file, "r", encoding="utf-8") as f:
@@ -96,7 +103,7 @@ class VaultIndexer:
                 logger.info(f"Loaded {len(patterns) - 2} patterns from .vaultignore")
             except Exception as e:
                 logger.error(f"Failed to load .vaultignore: {e}")
-        
+
         return list(set(patterns))
 
     def _is_excluded(self, rel_path: str) -> bool:
@@ -104,15 +111,17 @@ class VaultIndexer:
         # Normalize slashes for matching
         norm_path = rel_path.replace(os.sep, "/")
         path_parts = norm_path.split("/")
-        
+
         for pattern in self.exclude_patterns:
             # Handle patterns like "private/" by stripping trailing slash
             clean_pattern = pattern.replace(os.sep, "/").rstrip("/")
-            
+
             # 1. Match against full relative path
-            if fnmatch.fnmatch(norm_path, clean_pattern) or fnmatch.fnmatch(norm_path, f"{clean_pattern}/*"):
+            if fnmatch.fnmatch(norm_path, clean_pattern) or fnmatch.fnmatch(
+                norm_path, f"{clean_pattern}/*"
+            ):
                 return True
-                
+
             # 2. Match against each part of the path (for simple patterns like ".obsidian")
             for part in path_parts:
                 if fnmatch.fnmatch(part, clean_pattern):
@@ -122,7 +131,7 @@ class VaultIndexer:
     def get_file_hash(self, file_path: str) -> str:
         """Calculate MD5 hash of a file."""
         hasher = hashlib.md5()
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             buf = f.read()
             hasher.update(buf)
         return hasher.hexdigest()
@@ -138,18 +147,18 @@ class VaultIndexer:
 
         if show_log:
             logger.info(f"Indexing file: {rel_path}")
-        
+
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            
-            file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-            
+
+            file_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+
             # Check if file has changed
             existing = self.db.conn.execute(
                 "SELECT md5 FROM documents WHERE path = ?", (rel_path,)
             ).fetchone()
-            
+
             if existing and existing[0] == file_hash:
                 if show_log:
                     logger.debug(f"File unchanged: {rel_path}")
@@ -158,22 +167,18 @@ class VaultIndexer:
             # File changed or new, proceed to index
             metadata, body = self.parser.extract_metadata(content)
             chunks = self.parser.chunk_by_headers(body)
-            
+
             # Use a transaction for the update
             self.db.conn.execute("BEGIN TRANSACTION")
             try:
                 # 1. Update/Insert document (Manually handle cascade)
-                self.db.conn.execute(
-                    "DELETE FROM chunks WHERE document_path = ?", (rel_path,)
-                )
-                self.db.conn.execute(
-                    "DELETE FROM documents WHERE path = ?", (rel_path,)
-                )
+                self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
+                self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
                 self.db.conn.execute(
                     "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
-                    (rel_path, file_hash, json.dumps(metadata))
+                    (rel_path, file_hash, json.dumps(metadata)),
                 )
-                
+
                 # 2. Generate embeddings for chunks and insert
                 if chunks:
                     embeddings = self.model.encode(chunks)
@@ -181,16 +186,16 @@ class VaultIndexer:
                         chunk_id = str(uuid.uuid4())
                         self.db.conn.execute(
                             "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
-                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i}))
+                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i})),
                         )
-                
+
                 self.db.conn.execute("COMMIT")
                 if show_log:
                     logger.info(f"Successfully indexed {rel_path} ({len(chunks)} chunks)")
             except Exception as e:
                 self.db.conn.execute("ROLLBACK")
                 logger.error(f"Error during transaction for {rel_path}: {e}")
-                
+
         except Exception as e:
             logger.error(f"Failed to index file {file_path}: {e}")
 
@@ -207,29 +212,35 @@ class VaultIndexer:
     def full_sync(self):
         """Perform a full sync of the vault with progress bar."""
         logger.info("Starting full sync...")
-        
+
         # Get all files in DB to find deletions
-        db_files = set(row[0] for row in self.db.conn.execute("SELECT path FROM documents").fetchall())
+        db_files = set(
+            row[0] for row in self.db.conn.execute("SELECT path FROM documents").fetchall()
+        )
         current_files = []
 
         # First pass: collect all files to index
         for root, dirs, files in os.walk(self.vault_path):
             # filter dirs in-place to avoid traversing excluded directories
-            dirs[:] = [d for d in dirs if not self._is_excluded(os.path.relpath(os.path.join(root, d), self.vault_path))]
-            
+            dirs[:] = [
+                d
+                for d in dirs
+                if not self._is_excluded(os.path.relpath(os.path.join(root, d), self.vault_path))
+            ]
+
             for file in files:
                 if file.endswith(".md"):
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, self.vault_path)
                     if not self._is_excluded(rel_path):
                         current_files.append((full_path, rel_path))
-        
+
         # Second pass: index files with progress bar
         if current_files:
             logger.info(f"Found {len(current_files)} markdown files. Syncing...")
             for full_path, rel_path in tqdm(current_files, desc="Syncing Vault", unit="file"):
                 self.index_file(full_path, show_log=False)
-        
+
         # Remove files that no longer exist
         current_rel_paths = set(p for _, p in current_files)
         deleted_files = db_files - current_rel_paths
@@ -237,8 +248,9 @@ class VaultIndexer:
             logger.info(f"Removing deleted file: {rel_path}")
             self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
             self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
-            
+
         logger.info("Full sync complete")
+
 
 class VaultWatchdogHandler(FileSystemEventHandler):
     def __init__(self, indexer: VaultIndexer):
@@ -262,6 +274,7 @@ class VaultWatchdogHandler(FileSystemEventHandler):
                 self.indexer.delete_file(event.src_path)
             if event.dest_path.endswith(".md"):
                 self.indexer.index_file(event.dest_path)
+
 
 def start_watcher(vault_path: str, indexer: VaultIndexer):
     """Start the watchdog observer to monitor the vault."""

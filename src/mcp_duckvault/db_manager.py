@@ -1,7 +1,9 @@
-import duckdb
 import logging
 
+import duckdb
+
 logger = logging.getLogger(__name__)
+
 
 class DatabaseManager:
     def __init__(self, db_path: str = "vault.db"):
@@ -12,7 +14,7 @@ class DatabaseManager:
         """Establish a connection to DuckDB and ensure the vss extension is loaded."""
         logger.info(f"Connecting to DuckDB at {self.db_path}")
         self.conn = duckdb.connect(self.db_path)
-        
+
         # Install and load vss extension
         self.conn.execute("INSTALL vss;")
         self.conn.execute("LOAD vss;")
@@ -24,7 +26,7 @@ class DatabaseManager:
             self.connect()
 
         logger.info("Initializing database schema...")
-        
+
         # Table for system configuration and sync status
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS system_config (
