@@ -1,6 +1,5 @@
 import logging
-import json
-from typing import List, Optional, Dict, Any
+from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from .db_manager import DatabaseManager
 from .indexer import EmbeddingModel
