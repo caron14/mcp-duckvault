@@ -10,6 +10,7 @@ authors = [
     { name = "caron14", email = "caron14@users.noreply.github.com" }
 ]
 dependencies = [
+    "click>=8.0.0",
     "duckdb>=1.5.1",
     "mcp[cli]>=1.27.0",
     "pandas>=3.0.2",
