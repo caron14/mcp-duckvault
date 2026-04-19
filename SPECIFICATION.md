@@ -22,6 +22,8 @@ This document serves as the absolute source of truth for the `mcp-duckvault` pro
 -   **Embedding Model**: `intfloat/multilingual-e5-small` (Sentence-Transformers)
 -   **MCP Framework**: FastMCP
 -   **File Monitoring**: Watchdog
+-   **UI/UX**: `tqdm` for progress indicators
+-   **Testing**: `pytest`
 
 ---
 
@@ -34,7 +36,11 @@ To maintain code quality and consistency, the following tools are used:
 
 These tools are enforced via GitHub Actions on every push and pull request.
 
-### 3.2 Dependency Management
+### 3.2 Testing Strategy
+- **Unit Tests**: The project uses `pytest` to verify core components.
+- **Scope**: Tests cover markdown parsing, header-based chunking, exclusion rules, and search/tag filtering logic.
+
+### 3.3 Dependency Management
 - **uv**: The project uses `uv` for dependency management and environment isolation.
 
 ---
@@ -45,6 +51,8 @@ These tools are enforced via GitHub Actions on every push and pull request.
 -   **Role**: Entry point and orchestrator.
 -   **Responsibilities**:
     -   Argument parsing (vault path, DB path).
+    -   Default path handling: Sets default database and model cache to `~/.duckvault/`.
+    -   Shared Component Initialization: Initializes the `EmbeddingModel` instance to be shared across the system.
     -   Logging configuration (all logs to `stderr`).
     -   Lifecycle management: Initialize DB -> Full Sync -> Start Watcher -> Start MCP Server.
 
@@ -60,15 +68,17 @@ These tools are enforced via GitHub Actions on every push and pull request.
 -   **Role**: Data processing and synchronization.
 -   **Responsibilities**:
     -   **Markdown Parsing**: Frontmatter extraction and H1-H3 header-based chunking.
-    -   **Embedding Generation**: Transforming text chunks into vectors using E5 model.
+    -   **Embedding Generation**: Transforming text chunks into vectors using a shared `EmbeddingModel`.
     -   **Incremental Sync**: MD5 hashing to detect file changes.
+    -   **Progress Tracking**: Uses `tqdm` to provide visual feedback during full synchronization.
     -   **Exclusion**: Respects `.vaultignore` and default system exclusions (`.obsidian`, `.trash`).
 
 ### 4.4 MCP Server (`mcp_server.py`)
 -   **Role**: API Interface.
 -   **Responsibilities**:
     -   Exposing tools (`search_notes`, `list_recent_notes`) to AI agents.
-    -   Executing vector search queries against DuckDB.
+    -   **Obsidian URI Generation**: Provides direct links (`obsidian://open?vault=...`) for all retrieved results.
+    -   Executing vector search queries against DuckDB with enhanced tag filtering.
 
 ---
 
@@ -124,13 +134,16 @@ Using the E5 model family requirements:
 -   **Process**:
     1.  Encodes `query` with `query: ` prefix.
     2.  Executes SQL: `1 - (embedding <=> ?::FLOAT[])` for cosine similarity.
-    3.  Filters by optional `tag` within the document metadata.
--   **Output**: Markdown formatted string containing file paths, similarity scores, and chunk content.
+    3.  Filters by optional `tag` within the document metadata, supporting multiple JSON formats (arrays, strings, space-separated).
+-   **Output**: Markdown formatted string containing:
+    -   File paths and similarity scores.
+    -   Obsidian URI link (`obsidian://open?vault=...`).
+    -   Chunk content.
 
 ### 7.2 `list_recent_notes(days: int)`
 -   **Process**:
     1.  Queries `documents` table where `updated_at >= CURRENT_TIMESTAMP - (INTERVAL '1 day' * ?)`.
--   **Output**: List of file paths and their last update timestamps.
+-   **Output**: List of file paths, last update timestamps, and Obsidian URI links.
 
 ---
 
@@ -140,10 +153,3 @@ Using the E5 model family requirements:
 -   **Transactions**: Indexing a file is atomic. If chunking or embedding fails, the transaction is rolled back, preserving the previous state of the file in the database.
 -   **Database Safety**: Automatic HNSW index creation is wrapped in try-catch to allow fallback to linear search if the extension fails.
 
----
-
-## 9. Future Enhancements
-
-1.  **Improve UX with Progress Indicators during Initial Indexing (Priority: High)**: Implement progress bars (e.g., using `tqdm`) during the indexing process in the CLI to provide visibility into the progress for large vaults.
-2.  **Add Obsidian URI Links to Search Results (Priority: High)**: Include `obsidian://open?vault=...` format links in the search result metadata, enabling AI agents to provide direct links for users to open notes immediately.
-3.  **Default Database and Model Cache Locations (Priority: Medium)**: Change the default configuration to store the database file (`vault.db`) and embedding model cache in the user's home directory (e.g., `~/.duckvault/`) instead of the current working directory to ensure stable operation as a system-wide tool.
