@@ -33,11 +33,38 @@ Start the MCP server by pointing it to your Obsidian Vault:
 duckvault /path/to/your/obsidian/vault
 ```
 
-### Options
-
+**Options**
 - `--db-path`: Path to the DuckDB file (default: `~/.duckvault/vault.db`).
 - `--sync-only`: Perform a full sync of the vault and exit.
 - `-v, --verbose`: Enable verbose logging.
+
+### CLI Examples
+
+**Basic usage:**
+```bash
+duckvault /path/to/your/obsidian/vault
+```
+
+**Custom database path:**
+Specify a custom location for the DuckDB index file.
+```bash
+duckvault /path/to/your/obsidian/vault --db-path ./vault_index.db
+```
+
+**Sync only (Headless mode):**
+Index all files and exit without starting the MCP server.
+```bash
+duckvault /path/to/your/obsidian/vault --sync-only
+```
+
+### Example Queries for AI Agents
+
+Once connected, you can interact with your vault using natural language through an AI agent:
+
+- **Semantic Search**: "Find notes about machine learning projects and list the key concepts mentioned."
+- **Filtered Search**: "Search for notes about 'meeting' with the tag #work and summarize the action items."
+- **Stay Updated**: "What are the most important notes I've worked on in the last 3 days?"
+- **Cross-Note Analysis**: "Based on my recent notes about 'React', how has my understanding of Hooks evolved?"
 
 ### Excluding Files (`.vaultignore`)
 
