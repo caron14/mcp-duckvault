@@ -9,11 +9,11 @@ def setup_logging(verbose: bool):
     """
     Configure the logging system for the entire application.
 
-    CRITICAL DESIGN NOTE:
-    All logs are directed to stderr instead of stdout. This is because the
-    MCP (Model Context Protocol) server uses stdout for its JSON-RPC communication
-    with the LLM client. Mixing log messages into stdout would corrupt the
-    communication protocol.
+    NOTE:
+        All logs are directed to stderr instead of stdout. This is because the
+        MCP (Model Context Protocol) server uses stdout for its JSON-RPC communication
+        with the LLM client. Mixing log messages into stdout would corrupt the
+        communication protocol.
 
     Args:
         verbose (bool): If True, sets logging level to DEBUG; otherwise, sets to INFO.
