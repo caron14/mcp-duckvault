@@ -25,6 +25,11 @@ class EmbeddingModel:
         self.model = SentenceTransformer(model_name)
         self.model_name = model_name
 
+    @property
+    def dimension(self) -> int:
+        """Get the embedding dimension of the model."""
+        return self.model.get_sentence_embedding_dimension()
+
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
         """Encode a list of texts into embeddings.
         Adds 'query: ' or 'passage: ' prefix as required by e5 models.
@@ -171,7 +176,7 @@ class VaultIndexer:
             # Use a transaction for the update
             self.db.conn.execute("BEGIN TRANSACTION")
             try:
-                # 1. Update/Insert document (Manually handle cascade)
+                # 1. Update/Insert document (Manually handle cleanup)
                 self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
                 self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
                 self.db.conn.execute(

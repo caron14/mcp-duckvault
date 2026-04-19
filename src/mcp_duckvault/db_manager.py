@@ -20,12 +20,25 @@ class DatabaseManager:
         self.conn.execute("LOAD vss;")
         logger.info("vss extension loaded successfully")
 
-    def initialize_schema(self):
-        """Create the necessary tables if they don't exist."""
+        # Enable experimental HNSW persistence for persistent databases
+        # This must be done AFTER loading the vss extension
+        try:
+            self.conn.execute("SET hnsw_enable_experimental_persistence = true;")
+        except Exception as e:
+            logger.debug(f"Could not set hnsw_enable_experimental_persistence: {e}")
+
+    def initialize_schema(self, embedding_dim: int = 384):
+        """
+        Create the necessary tables if they don't exist.
+        
+        Args:
+            embedding_dim (int): The dimension of the vector embeddings.
+                                Defaults to 384 (multilingual-e5-small).
+        """
         if not self.conn:
             self.connect()
 
-        logger.info("Initializing database schema...")
+        logger.info(f"Initializing database schema with embedding_dim={embedding_dim}...")
 
         # Table for system configuration and sync status
         self.conn.execute("""
@@ -46,26 +59,28 @@ class DatabaseManager:
         """)
 
         # Table for text chunks with embeddings
-        # document_path REFERENCES documents(path)
-        self.conn.execute("""
+        # Note: HNSW index requires a fixed-size FLOAT array (FLOAT[N])
+        self.conn.execute(f"""
             CREATE TABLE IF NOT EXISTS chunks (
                 chunk_id VARCHAR PRIMARY KEY,
                 document_path VARCHAR,
                 content TEXT,
-                embedding FLOAT[],
-                metadata JSON,
-                FOREIGN KEY (document_path) REFERENCES documents(path)
+                embedding FLOAT[{embedding_dim}],
+                metadata JSON
             );
         """)
 
         # Create HNSW index for vector search if it doesn't exist
-        # Note: In DuckDB vss, indexes are created on the embedding column.
-        # We'll check if index exists or just try/catch
         try:
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS chunk_vec_idx ON chunks USING HNSW (embedding) WITH (metric = 'cosine');
-            """)
-            logger.info("HNSW index created/verified")
+            # First, check if index exists in DuckDB system tables
+            existing = self.conn.execute("SELECT * FROM duckdb_indexes() WHERE index_name = 'chunk_vec_idx'").fetchone()
+            if not existing:
+                self.conn.execute("""
+                    CREATE INDEX chunk_vec_idx ON chunks USING HNSW (embedding) WITH (metric = 'cosine');
+                """)
+                logger.info("HNSW index created successfully")
+            else:
+                logger.info("HNSW index already exists")
         except Exception as e:
             logger.warning(f"Could not create HNSW index: {e}. Vector search might be slower.")
 

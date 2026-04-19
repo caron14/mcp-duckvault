@@ -71,7 +71,7 @@ def main(vault_path: str, db_path: str, sync_only: bool, verbose: bool):
 
     # 1. Initialize Database
     try:
-        db.initialize_schema()
+        db.initialize_schema(embedding_dim=model.dimension)
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         sys.exit(1)
