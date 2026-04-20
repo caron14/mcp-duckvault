@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -17,6 +17,12 @@ from watchdog.observers import Observer
 from .db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj):
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is NOT JSON serializable")
 
 
 class EmbeddingModel:
@@ -286,7 +292,7 @@ class VaultIndexer:
                 self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
                 self.db.conn.execute(
                     "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
-                    (rel_path, file_hash, json.dumps(metadata)),
+                    (rel_path, file_hash, json.dumps(metadata, default=_json_default)),
                 )
 
                 # 2. Generate embeddings for chunks and insert
@@ -296,7 +302,7 @@ class VaultIndexer:
                         chunk_id = str(uuid.uuid4())
                         self.db.conn.execute(
                             "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
-                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i})),
+                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i}, default=_json_default)),
                         )
 
                 self.db.conn.execute("COMMIT")
