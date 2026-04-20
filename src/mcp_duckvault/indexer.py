@@ -53,7 +53,12 @@ class EmbeddingModel:
 
     @property
     def model(self) -> SentenceTransformer:
-        """Lazily loads and returns the SentenceTransformer model."""
+        """Lazily loads and returns the SentenceTransformer model.
+
+        Note: Lazy loading is CRITICAL for MCP servers. Loading the model during
+        startup can take >10 seconds due to network checks or heavy weights,
+        causing MCP clients (like Claude Code) to timeout and fail to connect.
+        """
         if self._model is None:
             logger.info(f"Loading embedding model: {self.model_name}")
             try:
