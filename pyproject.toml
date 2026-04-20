@@ -1,6 +1,6 @@
 [project]
 name = "mcp-duckvault"
-version = "0.2.0"
+version = "0.2.1"
 description = "DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server"
 readme = "README.md"
 license = { text = "MIT" }
