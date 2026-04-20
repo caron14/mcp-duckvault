@@ -44,9 +44,32 @@ class EmbeddingModel:
             model_name (str): The name of the model to load from HuggingFace
                 or a local path. Defaults to "intfloat/multilingual-e5-small".
         """
-        logger.info(f"Loading embedding model: {model_name}")
-        self.model = SentenceTransformer(model_name)
         self.model_name = model_name
+        self._model = None
+        # Default dimension for the e5-small model family to allow lazy loading
+        self._dimension = (
+            384 if model_name == "intfloat/multilingual-e5-small" else None
+        )
+
+    @property
+    def model(self) -> SentenceTransformer:
+        """Lazily loads and returns the SentenceTransformer model."""
+        if self._model is None:
+            logger.info(f"Loading embedding model: {self.model_name}")
+            try:
+                # First attempt: load locally to avoid slow HuggingFace network checks
+                # Set environment variable to strictly enforce offline mode
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                self._model = SentenceTransformer(self.model_name, local_files_only=True)
+                logger.info(f"Loaded {self.model_name} from local cache.")
+            except Exception:
+                # Fallback: download if not present
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                logger.info(
+                    f"Model not found locally. Downloading {self.model_name} from HuggingFace..."
+                )
+                self._model = SentenceTransformer(self.model_name)
+        return self._model
 
     @property
     def dimension(self) -> int:
@@ -55,7 +78,9 @@ class EmbeddingModel:
         Returns:
             int: The size of the vector produced by the model.
         """
-        return self.model.get_sentence_embedding_dimension()
+        if self._dimension:
+            return self._dimension
+        return self.model.get_embedding_dimension()
 
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
         """Encodes a list of strings into a list of vector embeddings.
