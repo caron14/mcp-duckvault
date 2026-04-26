@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -17,6 +17,12 @@ from watchdog.observers import Observer
 from .db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj):
+    if isinstance(obj, (date, datetime)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is NOT JSON serializable")
 
 
 class EmbeddingModel:
@@ -38,9 +44,35 @@ class EmbeddingModel:
             model_name (str): The name of the model to load from HuggingFace
                 or a local path. Defaults to "intfloat/multilingual-e5-small".
         """
-        logger.info(f"Loading embedding model: {model_name}")
-        self.model = SentenceTransformer(model_name)
         self.model_name = model_name
+        self._model = None
+        # Default dimension for the e5-small model family to allow lazy loading
+        self._dimension = 384 if model_name == "intfloat/multilingual-e5-small" else None
+
+    @property
+    def model(self) -> SentenceTransformer:
+        """Lazily loads and returns the SentenceTransformer model.
+
+        Note: Lazy loading is CRITICAL for MCP servers. Loading the model during
+        startup can take >10 seconds due to network checks or heavy weights,
+        causing MCP clients (like Claude Code) to timeout and fail to connect.
+        """
+        if self._model is None:
+            logger.info(f"Loading embedding model: {self.model_name}")
+            try:
+                # First attempt: load locally to avoid slow HuggingFace network checks
+                # Set environment variable to strictly enforce offline mode
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                self._model = SentenceTransformer(self.model_name, local_files_only=True)
+                logger.info(f"Loaded {self.model_name} from local cache.")
+            except Exception:
+                # Fallback: download if not present
+                os.environ["HF_HUB_OFFLINE"] = "0"
+                logger.info(
+                    f"Model not found locally. Downloading {self.model_name} from HuggingFace..."
+                )
+                self._model = SentenceTransformer(self.model_name)
+        return self._model
 
     @property
     def dimension(self) -> int:
@@ -49,7 +81,9 @@ class EmbeddingModel:
         Returns:
             int: The size of the vector produced by the model.
         """
-        return self.model.get_sentence_embedding_dimension()
+        if self._dimension:
+            return self._dimension
+        return self.model.get_embedding_dimension()
 
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
         """Encodes a list of strings into a list of vector embeddings.
@@ -286,7 +320,7 @@ class VaultIndexer:
                 self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
                 self.db.conn.execute(
                     "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
-                    (rel_path, file_hash, json.dumps(metadata)),
+                    (rel_path, file_hash, json.dumps(metadata, default=_json_default)),
                 )
 
                 # 2. Generate embeddings for chunks and insert
@@ -296,7 +330,13 @@ class VaultIndexer:
                         chunk_id = str(uuid.uuid4())
                         self.db.conn.execute(
                             "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
-                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i})),
+                            (
+                                chunk_id,
+                                rel_path,
+                                chunk_text,
+                                vec,
+                                json.dumps({"index": i}, default=_json_default),
+                            ),
                         )
 
                 self.db.conn.execute("COMMIT")
