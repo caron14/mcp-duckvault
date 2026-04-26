@@ -47,9 +47,7 @@ class EmbeddingModel:
         self.model_name = model_name
         self._model = None
         # Default dimension for the e5-small model family to allow lazy loading
-        self._dimension = (
-            384 if model_name == "intfloat/multilingual-e5-small" else None
-        )
+        self._dimension = 384 if model_name == "intfloat/multilingual-e5-small" else None
 
     @property
     def model(self) -> SentenceTransformer:
@@ -332,7 +330,13 @@ class VaultIndexer:
                         chunk_id = str(uuid.uuid4())
                         self.db.conn.execute(
                             "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
-                            (chunk_id, rel_path, chunk_text, vec, json.dumps({"index": i}, default=_json_default)),
+                            (
+                                chunk_id,
+                                rel_path,
+                                chunk_text,
+                                vec,
+                                json.dumps({"index": i}, default=_json_default),
+                            ),
                         )
 
                 self.db.conn.execute("COMMIT")
