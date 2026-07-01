@@ -1,7 +1,7 @@
 [project]
 name = "mcp-duckvault"
-version = "0.2.1"
-description = "DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server"
+version = "0.3.0"
+description = "DuckVault-MCP: local vector and visual graph RAG for Markdown and OKF"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
