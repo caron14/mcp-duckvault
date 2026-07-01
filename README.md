@@ -5,7 +5,7 @@ knowledge bases. It combines DuckDB vector search, local GraphRAG, [Open Knowled
 Format (OKF) support](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md), and an offline interactive graph viewer behind an MCP
 interface.
 
-- [Quick Start](#quick-start--v040)
+- [Quick Start](#quick-start--v030)
 - [Features](#features)
 - [CLI Reference](#cli-reference)
 - [MCP Tools](#mcp-tools)
