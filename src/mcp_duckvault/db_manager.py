@@ -55,7 +55,7 @@ class DatabaseManager:
     def initialize_schema(self, embedding_dim: int = 384):
         """Creates the necessary tables and indices if they do not exist.
 
-        Initializes 'system_config', 'documents', and 'chunks' tables.
+        Initializes vector-search and local graph tables.
         Also creates an HNSW index on the 'embedding' column in the 'chunks'
         table for efficient vector similarity search.
 
@@ -101,6 +101,50 @@ class DatabaseManager:
             );
         """)
 
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                node_id VARCHAR PRIMARY KEY,
+                node_type VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                document_path VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS edges (
+                edge_id VARCHAR PRIMARY KEY,
+                source_node_id VARCHAR NOT NULL,
+                target_node_id VARCHAR NOT NULL,
+                edge_type VARCHAR NOT NULL,
+                weight DOUBLE DEFAULT 1.0,
+                document_path VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS node_mentions (
+                mention_id VARCHAR PRIMARY KEY,
+                node_id VARCHAR NOT NULL,
+                chunk_id VARCHAR,
+                document_path VARCHAR NOT NULL,
+                mention_text VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS edge_nodes_idx
+                ON edges (source_node_id, target_node_id);
+            CREATE INDEX IF NOT EXISTS edge_document_idx
+                ON edges (document_path);
+            CREATE INDEX IF NOT EXISTS node_document_idx
+                ON nodes (document_path);
+            CREATE INDEX IF NOT EXISTS mention_node_chunk_idx
+                ON node_mentions (node_id, chunk_id);
+            CREATE INDEX IF NOT EXISTS mention_document_idx
+                ON node_mentions (document_path);
+        """)
+
         # Create HNSW index for vector search if it doesn't exist
         try:
             # First, check if index exists in DuckDB system tables
@@ -123,4 +167,5 @@ class DatabaseManager:
         """Closes the active database connection."""
         if self.conn:
             self.conn.close()
+            self.conn = None
             logger.info("Database connection closed")

@@ -1,13 +1,26 @@
 [project]
 name = "mcp-duckvault"
-version = "0.2.1"
-description = "DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server"
+version = "0.3.0"
+description = "DuckVault-MCP: local vector and visual graph RAG for Markdown and OKF"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 keywords = ["mcp", "obsidian", "duckdb", "rag", "vector-search"]
 authors = [
     { name = "caron14", email = "caron14@users.noreply.github.com" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
     "click>=8.0.0",
@@ -49,3 +62,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_duckvault"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/CLAUDE.md",
+]

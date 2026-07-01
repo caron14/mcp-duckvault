@@ -2,10 +2,13 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
 from .db_manager import DatabaseManager
+from .graph_repository import GraphRepository
+from .graph_visualizer import write_graph_visualization
 from .indexer import EmbeddingModel, VaultIndexer, start_watcher
 from .mcp_server import create_mcp_server
 
@@ -51,20 +54,34 @@ def get_default_paths():
 @click.option(
     "--sync-only", is_flag=True, help="Perform full sync and exit without starting MCP server"
 )
+@click.option(
+    "--visualize",
+    is_flag=True,
+    help="Generate an offline graph viewer after sync and exit",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("duckvault-graph.html"),
+    show_default=True,
+    help="Output path for --visualize HTML",
+)
+@click.option(
+    "--json-output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="JSON output path (default: HTML path with .json suffix)",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
-def main(vault_path: str, db_path: str, sync_only: bool, verbose: bool):
-    """DuckVault-MCP: Obsidian-DuckDB RAG System with MCP Server.
-
-    This is the main entry point for the CLI. It handles initialization,
-    full synchronization of the vault, background monitoring, and
-    starting the MCP server.
-
-    Args:
-        vault_path (str): The absolute path to the Obsidian Vault.
-        db_path (str): The path to the DuckDB database file.
-        sync_only (bool): If True, exits after performing a full sync.
-        verbose (bool): If True, enables verbose (DEBUG) logging.
-    """
+def main(
+    vault_path: str,
+    db_path: str,
+    sync_only: bool,
+    visualize: bool,
+    output: Path,
+    json_output: Optional[Path],
+    verbose: bool,
+):
+    """Index VAULT_PATH, then run the MCP server or export its knowledge graph."""
     setup_logging(verbose)
     logger = logging.getLogger("mcp_duckvault")
 
@@ -94,11 +111,27 @@ def main(vault_path: str, db_path: str, sync_only: bool, verbose: bool):
         indexer.full_sync()
     except Exception as e:
         logger.error(f"Full sync failed: {e}")
-        if sync_only:
+        if sync_only or visualize:
+            db.close()
             sys.exit(1)
+
+    if visualize:
+        try:
+            html_path, graph_json_path = write_graph_visualization(
+                GraphRepository(db), vault_path, output, json_output
+            )
+            logger.info(f"Graph HTML written to {html_path}")
+            logger.info(f"Graph JSON written to {graph_json_path}")
+        except Exception as e:
+            logger.error(f"Graph visualization failed: {e}")
+            db.close()
+            sys.exit(1)
+        db.close()
+        return
 
     if sync_only:
         logger.info("Sync complete. Exiting.")
+        db.close()
         return
 
     # 3. Start Background Watcher

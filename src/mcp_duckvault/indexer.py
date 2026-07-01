@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +14,8 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .db_manager import DatabaseManager
+from .graph_extractor import GraphExtractor
+from .graph_repository import GraphRepository
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ class VaultIndexer:
         self.db = db_manager
         self.model = model or EmbeddingModel()
         self.parser = MarkdownParser()
+        self.graph_extractor = GraphExtractor(self.vault_path)
+        self.graph_repository = GraphRepository(db_manager)
         self.exclude_patterns = self._load_exclude_patterns()
 
     def _load_exclude_patterns(self) -> List[str]:
@@ -285,7 +288,7 @@ class VaultIndexer:
         if not file_path.endswith(".md"):
             return
 
-        rel_path = os.path.relpath(file_path, self.vault_path)
+        rel_path = os.path.relpath(file_path, self.vault_path).replace(os.sep, "/")
         if self._is_excluded(rel_path):
             return
 
@@ -303,7 +306,15 @@ class VaultIndexer:
                 "SELECT md5 FROM documents WHERE path = ?", (rel_path,)
             ).fetchone()
 
-            if existing and existing[0] == file_hash:
+            graph_exists = (
+                self.db.conn.execute(
+                    "SELECT 1 FROM nodes WHERE node_id = ?",
+                    (f"doc:{rel_path}",),
+                ).fetchone()
+                if existing
+                else None
+            )
+            if existing and existing[0] == file_hash and graph_exists:
                 if show_log:
                     logger.debug(f"File unchanged: {rel_path}")
                 return
@@ -311,6 +322,8 @@ class VaultIndexer:
             # File changed or new, proceed to index
             metadata, body = self.parser.extract_metadata(content)
             chunks = self.parser.chunk_by_headers(body)
+            embeddings = self.model.encode(chunks) if chunks else []
+            graph_data = self.graph_extractor.extract(rel_path, metadata, body)
 
             # Use a transaction for the update
             self.db.conn.execute("BEGIN TRANSACTION")
@@ -318,28 +331,32 @@ class VaultIndexer:
                 # 1. Update/Insert document (Manually handle cleanup)
                 self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
                 self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
+                self.graph_repository.delete_document_graph(rel_path)
                 self.db.conn.execute(
                     "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
                     (rel_path, file_hash, json.dumps(metadata, default=_json_default)),
                 )
 
                 # 2. Generate embeddings for chunks and insert
-                if chunks:
-                    embeddings = self.model.encode(chunks)
-                    for i, (chunk_text, vec) in enumerate(zip(chunks, embeddings)):
-                        chunk_id = str(uuid.uuid4())
-                        self.db.conn.execute(
-                            "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
-                            (
-                                chunk_id,
-                                rel_path,
-                                chunk_text,
-                                vec,
-                                json.dumps({"index": i}, default=_json_default),
-                            ),
-                        )
+                for i, (chunk_text, vec) in enumerate(zip(chunks, embeddings)):
+                    chunk_id = hashlib.sha1(f"{rel_path}\0{i}".encode()).hexdigest()
+                    self.db.conn.execute(
+                        "INSERT INTO chunks (chunk_id, document_path, content, embedding, metadata) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            chunk_id,
+                            rel_path,
+                            chunk_text,
+                            vec,
+                            json.dumps({"index": i}, default=_json_default),
+                        ),
+                    )
 
+                self.graph_repository.upsert_document_graph(rel_path, graph_data)
                 self.db.conn.execute("COMMIT")
+                try:
+                    self.graph_repository.collect_garbage()
+                except Exception as e:
+                    logger.warning(f"Graph garbage collection failed: {e}")
                 if show_log:
                     logger.info(f"Successfully indexed {rel_path} ({len(chunks)} chunks)")
             except Exception as e:
@@ -355,13 +372,21 @@ class VaultIndexer:
         Args:
             file_path (str): The full path to the file to be removed.
         """
-        rel_path = os.path.relpath(file_path, self.vault_path)
+        rel_path = os.path.relpath(file_path, self.vault_path).replace(os.sep, "/")
         if self._is_excluded(rel_path):
             return
 
         logger.info(f"Deleting file from index: {rel_path}")
-        self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
-        self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
+        self.db.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
+            self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
+            self.graph_repository.delete_document_graph(rel_path)
+            self.db.conn.execute("COMMIT")
+        except Exception:
+            self.db.conn.execute("ROLLBACK")
+            raise
+        self.graph_repository.collect_garbage()
 
     def full_sync(self):
         """Performs a full synchronization of the vault.
@@ -389,7 +414,7 @@ class VaultIndexer:
             for file in files:
                 if file.endswith(".md"):
                     full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, self.vault_path)
+                    rel_path = os.path.relpath(full_path, self.vault_path).replace(os.sep, "/")
                     if not self._is_excluded(rel_path):
                         current_files.append((full_path, rel_path))
 
@@ -404,8 +429,7 @@ class VaultIndexer:
         deleted_files = db_files - current_rel_paths
         for rel_path in deleted_files:
             logger.info(f"Removing deleted file: {rel_path}")
-            self.db.conn.execute("DELETE FROM chunks WHERE document_path = ?", (rel_path,))
-            self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
+            self.delete_file(os.path.join(self.vault_path, *rel_path.split("/")))
 
         logger.info("Full sync complete")
 

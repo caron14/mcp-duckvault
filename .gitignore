@@ -19,3 +19,8 @@ vault.db
 vault.db.wal
 GEMINI.md
 CODEBASE_GUIDE.md
+
+# Local testing & temporary cache
+.pytest_cache/
+tmp/
+.DS_Store
