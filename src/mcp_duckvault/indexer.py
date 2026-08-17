@@ -4,20 +4,25 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 import yaml
+from huggingface_hub import snapshot_download
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .db_manager import DatabaseManager
+from .errors import DuckVaultError
 from .graph_extractor import GraphExtractor
 from .graph_repository import GraphRepository
+from .sync_status import IndexResult, IndexStatus, SyncPlan, SyncSummary, utc_now
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_MARKDOWN_BYTES = 10 * 1024 * 1024
 
 
 def _json_default(obj):
@@ -38,7 +43,12 @@ class EmbeddingModel:
         model_name (str): The name/ID of the model being used.
     """
 
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-small"):
+    def __init__(
+        self,
+        model_name: str = "intfloat/multilingual-e5-small",
+        *,
+        allow_download: bool = True,
+    ):
         """Initializes the EmbeddingModel with a specific pre-trained model.
 
         Args:
@@ -46,6 +56,7 @@ class EmbeddingModel:
                 or a local path. Defaults to "intfloat/multilingual-e5-small".
         """
         self.model_name = model_name
+        self.allow_download = allow_download
         self._model = None
         # Default dimension for the e5-small model family to allow lazy loading
         self._dimension = 384 if model_name == "intfloat/multilingual-e5-small" else None
@@ -60,19 +71,29 @@ class EmbeddingModel:
         """
         if self._model is None:
             logger.info(f"Loading embedding model: {self.model_name}")
+            cache_folder = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
             try:
-                # First attempt: load locally to avoid slow HuggingFace network checks
-                # Set environment variable to strictly enforce offline mode
-                os.environ["HF_HUB_OFFLINE"] = "1"
-                self._model = SentenceTransformer(self.model_name, local_files_only=True)
+                local_model = (
+                    self.model_name
+                    if os.path.isdir(self.model_name)
+                    else snapshot_download(
+                        repo_id=self.model_name,
+                        cache_dir=cache_folder,
+                        local_files_only=True,
+                    )
+                )
+                # Loading by resolved snapshot path avoids model-card/API checks that
+                # some sentence-transformers versions perform for a Hub ID.
+                self._model = SentenceTransformer(local_model, local_files_only=True)
                 logger.info(f"Loaded {self.model_name} from local cache.")
             except Exception:
+                if not self.allow_download:
+                    raise
                 # Fallback: download if not present
-                os.environ["HF_HUB_OFFLINE"] = "0"
                 logger.info(
                     f"Model not found locally. Downloading {self.model_name} from HuggingFace..."
                 )
-                self._model = SentenceTransformer(self.model_name)
+                self._model = SentenceTransformer(self.model_name, cache_folder=cache_folder)
         return self._model
 
     @property
@@ -134,8 +155,8 @@ class MarkdownParser:
             try:
                 frontmatter = yaml.safe_load(match.group(1)) or {}
                 remaining_content = content[match.end() :]
-            except Exception as e:
-                logger.warning(f"Failed to parse YAML frontmatter: {e}")
+            except Exception as exc:
+                logger.warning("Failed to parse YAML frontmatter (%s)", type(exc).__name__)
 
         return frontmatter, remaining_content
 
@@ -190,7 +211,12 @@ class VaultIndexer:
     """
 
     def __init__(
-        self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None
+        self,
+        vault_path: str,
+        db_manager: DatabaseManager,
+        model: Optional[EmbeddingModel] = None,
+        *,
+        max_file_size: int | None = None,
     ):
         """Initializes the VaultIndexer.
 
@@ -207,6 +233,14 @@ class VaultIndexer:
         self.graph_extractor = GraphExtractor(self.vault_path)
         self.graph_repository = GraphRepository(db_manager)
         self.exclude_patterns = self._load_exclude_patterns()
+        configured_limit = os.environ.get("DUCKVAULT_MAX_MARKDOWN_BYTES")
+        self.max_file_size = (
+            max_file_size
+            if max_file_size is not None
+            else int(configured_limit or DEFAULT_MAX_MARKDOWN_BYTES)
+        )
+        if self.max_file_size < 1:
+            raise ValueError("max_file_size must be positive")
 
     def _load_exclude_patterns(self) -> List[str]:
         """Loads exclusion patterns from .vaultignore or uses defaults.
@@ -225,12 +259,13 @@ class VaultIndexer:
                         if line and not line.startswith("#"):
                             patterns.append(line)
                 logger.info(f"Loaded {len(patterns) - 2} patterns from .vaultignore")
-            except Exception as e:
-                logger.error(f"Failed to load .vaultignore: {e}")
+            except Exception as exc:
+                logger.error("Failed to load .vaultignore (%s)", type(exc).__name__)
 
         return list(set(patterns))
 
-    def _is_excluded(self, rel_path: str) -> bool:
+    def exclusion_reason(self, rel_path: str) -> str | None:
+        """Return the matching ignore rule for a relative path, if any."""
         """Checks if a given relative path matches any exclusion patterns.
 
         Args:
@@ -251,13 +286,110 @@ class VaultIndexer:
             if fnmatch.fnmatch(norm_path, clean_pattern) or fnmatch.fnmatch(
                 norm_path, f"{clean_pattern}/*"
             ):
-                return True
+                return f"pattern:{pattern}"
 
             # 2. Match against each part of the path (for simple patterns like ".obsidian")
             for part in path_parts:
                 if fnmatch.fnmatch(part, clean_pattern):
-                    return True
-        return False
+                    return f"pattern:{pattern}"
+        return None
+
+    def _is_excluded(self, rel_path: str) -> bool:
+        return self.exclusion_reason(rel_path) is not None
+
+    def _path_safety_reason(self, file_path: str) -> str | None:
+        path = os.path.abspath(file_path)
+        try:
+            common = os.path.commonpath([self.vault_path, path])
+        except ValueError:
+            return "outside_vault"
+        if common != self.vault_path:
+            return "outside_vault"
+        if os.path.islink(path):
+            return "symlink_not_allowed"
+        try:
+            resolved = os.path.realpath(path)
+            if os.path.commonpath([self.vault_path, resolved]) != self.vault_path:
+                return "outside_vault"
+        except ValueError:
+            return "outside_vault"
+        return None
+
+    def _discover_files(self) -> tuple[list[tuple[str, str]], dict[str, str]]:
+        current_files: list[tuple[str, str]] = []
+        excluded: dict[str, str] = {}
+        for root, dirs, files in os.walk(self.vault_path, followlinks=False):
+            retained_dirs = []
+            for directory in dirs:
+                full_directory = os.path.join(root, directory)
+                relative_directory = os.path.relpath(full_directory, self.vault_path).replace(
+                    os.sep, "/"
+                )
+                reason = self.exclusion_reason(relative_directory)
+                if os.path.islink(full_directory):
+                    reason = "symlink_not_allowed"
+                if reason:
+                    excluded[relative_directory] = reason
+                else:
+                    retained_dirs.append(directory)
+            dirs[:] = retained_dirs
+            for filename in files:
+                if not filename.endswith(".md"):
+                    continue
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, self.vault_path).replace(os.sep, "/")
+                reason = self.exclusion_reason(rel_path) or self._path_safety_reason(full_path)
+                if reason:
+                    excluded[rel_path] = reason
+                else:
+                    current_files.append((full_path, rel_path))
+        return current_files, excluded
+
+    def plan_sync(self) -> SyncPlan:
+        """Calculate a synchronization plan without modifying the database."""
+        plan = SyncPlan()
+        current_files, exclusions = self._discover_files()
+        plan.excluded = len(exclusions)
+        plan.paths["excluded"] = sorted(exclusions)
+        plan.reasons.update(exclusions)
+        existing: dict[str, tuple[str, str | None]] = {}
+        if self.db.conn is not None and self.db._table_exists("documents"):
+            existing = {
+                row[0]: (row[1], row[2])
+                for row in self.db.conn.execute(
+                    "SELECT path, md5, index_signature FROM documents"
+                ).fetchall()
+            }
+        signature = self.db._config("index_signature") if self.db.conn is not None else None
+        current_paths: set[str] = set()
+        for full_path, rel_path in current_files:
+            current_paths.add(rel_path)
+            plan.scanned += 1
+            try:
+                size = os.path.getsize(full_path)
+                plan.total_bytes += size
+                if size > self.max_file_size:
+                    plan.failed += 1
+                    plan.paths["failed"].append(rel_path)
+                    plan.reasons[rel_path] = f"file_too_large:{size}>{self.max_file_size}"
+                    continue
+                digest = self.get_file_hash(full_path)
+            except OSError as exc:
+                plan.failed += 1
+                plan.paths["failed"].append(rel_path)
+                plan.reasons[rel_path] = f"unreadable:{type(exc).__name__}"
+                continue
+            previous = existing.get(rel_path)
+            if previous and previous == (digest, signature):
+                plan.skipped += 1
+                plan.paths["skipped"].append(rel_path)
+            else:
+                plan.indexed += 1
+                plan.paths["indexed"].append(rel_path)
+        deleted = sorted(set(existing) - current_paths)
+        plan.deleted = len(deleted)
+        plan.paths["deleted"] = deleted
+        return plan
 
     def get_file_hash(self, file_path: str) -> str:
         """Calculates the MD5 hash of a file's content.
@@ -274,7 +406,7 @@ class VaultIndexer:
             hasher.update(buf)
         return hasher.hexdigest()
 
-    def index_file(self, file_path: str, show_log: bool = True):
+    def index_file(self, file_path: str, show_log: bool = True) -> IndexResult:
         """Indexes a single Markdown file into the database.
 
         Checks if the file is a Markdown file, if it's excluded, and if
@@ -285,17 +417,32 @@ class VaultIndexer:
             file_path (str): The full path to the Markdown file.
             show_log (bool): Whether to log the indexing progress. Defaults to True.
         """
-        if not file_path.endswith(".md"):
-            return
-
         rel_path = os.path.relpath(file_path, self.vault_path).replace(os.sep, "/")
+        if not file_path.endswith(".md"):
+            return IndexResult(rel_path, IndexStatus.SKIPPED)
         if self._is_excluded(rel_path):
-            return
+            return IndexResult(rel_path, IndexStatus.SKIPPED)
+
+        safety_reason = self._path_safety_reason(file_path)
+        if safety_reason:
+            return IndexResult(
+                rel_path,
+                IndexStatus.FAILED,
+                error_code="UNSAFE_PATH",
+                error_type=safety_reason,
+                occurred_at=utc_now(),
+            )
 
         if show_log:
             logger.info(f"Indexing file: {rel_path}")
 
         try:
+            size = os.path.getsize(file_path)
+            if size > self.max_file_size:
+                raise DuckVaultError(
+                    "FILE_TOO_LARGE",
+                    f"Markdown file exceeds {self.max_file_size} bytes.",
+                )
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
 
@@ -303,7 +450,7 @@ class VaultIndexer:
 
             # Check if file has changed
             existing = self.db.conn.execute(
-                "SELECT md5 FROM documents WHERE path = ?", (rel_path,)
+                "SELECT md5, index_signature FROM documents WHERE path = ?", (rel_path,)
             ).fetchone()
 
             graph_exists = (
@@ -314,10 +461,18 @@ class VaultIndexer:
                 if existing
                 else None
             )
-            if existing and existing[0] == file_hash and graph_exists:
+            current_signature = self.db._config("index_signature")
+            if (
+                existing
+                and existing[0] == file_hash
+                and existing[1] == current_signature
+                and graph_exists
+            ):
                 if show_log:
                     logger.debug(f"File unchanged: {rel_path}")
-                return
+                result = IndexResult(rel_path, IndexStatus.SKIPPED)
+                self.db.record_index_result(result)
+                return result
 
             # File changed or new, proceed to index
             metadata, body = self.parser.extract_metadata(content)
@@ -333,8 +488,16 @@ class VaultIndexer:
                 self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
                 self.graph_repository.delete_document_graph(rel_path)
                 self.db.conn.execute(
-                    "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
-                    (rel_path, file_hash, json.dumps(metadata, default=_json_default)),
+                    "INSERT INTO documents "
+                    "(path, md5, metadata, source_modified_at, index_signature) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        rel_path,
+                        file_hash,
+                        json.dumps(metadata, default=_json_default),
+                        datetime.fromtimestamp(os.path.getmtime(file_path)),
+                        current_signature,
+                    ),
                 )
 
                 # 2. Generate embeddings for chunks and insert
@@ -355,18 +518,33 @@ class VaultIndexer:
                 self.db.conn.execute("COMMIT")
                 try:
                     self.graph_repository.collect_garbage()
-                except Exception as e:
-                    logger.warning(f"Graph garbage collection failed: {e}")
+                except Exception as exc:
+                    logger.warning("Graph garbage collection failed (%s)", type(exc).__name__)
                 if show_log:
                     logger.info(f"Successfully indexed {rel_path} ({len(chunks)} chunks)")
-            except Exception as e:
+                result = IndexResult(rel_path, IndexStatus.INDEXED)
+                self.db.record_index_result(result)
+                return result
+            except Exception:
                 self.db.conn.execute("ROLLBACK")
-                logger.error(f"Error during transaction for {rel_path}: {e}")
+                raise
 
-        except Exception as e:
-            logger.error(f"Failed to index file {file_path}: {e}")
+        except Exception as exc:
+            result = IndexResult(
+                rel_path,
+                IndexStatus.FAILED,
+                error_code=exc.code if isinstance(exc, DuckVaultError) else "INDEX_FILE_FAILED",
+                error_type=type(exc).__name__,
+                occurred_at=utc_now(),
+            )
+            logger.error("Failed to index file %s (%s)", rel_path, type(exc).__name__)
+            try:
+                self.db.record_index_result(result)
+            except Exception as record_exc:
+                logger.error("Failed to persist indexing failure (%s)", type(record_exc).__name__)
+            return result
 
-    def delete_file(self, file_path: str):
+    def delete_file(self, file_path: str) -> IndexResult:
         """Removes a file and its chunks from the index.
 
         Args:
@@ -383,55 +561,86 @@ class VaultIndexer:
             self.db.conn.execute("DELETE FROM documents WHERE path = ?", (rel_path,))
             self.graph_repository.delete_document_graph(rel_path)
             self.db.conn.execute("COMMIT")
-        except Exception:
+        except Exception as exc:
             self.db.conn.execute("ROLLBACK")
+            self.db.record_index_result(
+                IndexResult(
+                    rel_path,
+                    IndexStatus.FAILED,
+                    error_code="DELETE_INDEX_FAILED",
+                    error_type=type(exc).__name__,
+                    occurred_at=utc_now(),
+                )
+            )
             raise
         self.graph_repository.collect_garbage()
+        result = IndexResult(rel_path, IndexStatus.SKIPPED)
+        self.db.record_index_result(result)
+        return result
 
-    def full_sync(self):
+    def full_sync(self) -> SyncSummary:
         """Performs a full synchronization of the vault.
 
         Scans all Markdown files in the vault, indexes new or modified ones,
         and removes entries for files that no longer exist on disk.
         """
         logger.info("Starting full sync...")
+        summary = SyncSummary()
 
         # Get all files in DB to find deletions
         db_files = set(
             row[0] for row in self.db.conn.execute("SELECT path FROM documents").fetchall()
         )
-        current_files = []
+        current_files, exclusions = self._discover_files()
+        summary.excluded = len(exclusions)
 
-        # First pass: collect all files to index
-        for root, dirs, files in os.walk(self.vault_path):
-            # filter dirs in-place to avoid traversing excluded directories
-            dirs[:] = [
-                d
-                for d in dirs
-                if not self._is_excluded(os.path.relpath(os.path.join(root, d), self.vault_path))
-            ]
-
-            for file in files:
-                if file.endswith(".md"):
-                    full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, self.vault_path).replace(os.sep, "/")
-                    if not self._is_excluded(rel_path):
-                        current_files.append((full_path, rel_path))
+        summary.scanned = len(current_files)
 
         # Second pass: index files with progress bar
         if current_files:
             logger.info(f"Found {len(current_files)} markdown files. Syncing...")
             for full_path, rel_path in tqdm(current_files, desc="Syncing Vault", unit="file"):
-                self.index_file(full_path, show_log=False)
+                result = self.index_file(full_path, show_log=False)
+                if result.status == IndexStatus.INDEXED:
+                    summary.indexed += 1
+                elif result.status == IndexStatus.SKIPPED:
+                    summary.skipped += 1
+                else:
+                    summary.failed += 1
+                    summary.failures.append(result)
 
         # Remove files that no longer exist
         current_rel_paths = set(p for _, p in current_files)
         deleted_files = db_files - current_rel_paths
         for rel_path in deleted_files:
             logger.info(f"Removing deleted file: {rel_path}")
-            self.delete_file(os.path.join(self.vault_path, *rel_path.split("/")))
+            try:
+                self.delete_file(os.path.join(self.vault_path, *rel_path.split("/")))
+                summary.deleted += 1
+            except Exception as exc:
+                result = IndexResult(
+                    rel_path,
+                    IndexStatus.FAILED,
+                    error_code="DELETE_INDEX_FAILED",
+                    error_type=type(exc).__name__,
+                    occurred_at=utc_now(),
+                )
+                self.db.record_index_result(result)
+                summary.failed += 1
+                summary.failures.append(result)
 
-        logger.info("Full sync complete")
+        # Failures for files that disappeared before they were ever indexed are
+        # no longer current and must not keep the Vault degraded forever.
+        failed_paths = {
+            row[0] for row in self.db.conn.execute("SELECT path FROM sync_failures").fetchall()
+        }
+        for stale_failure in failed_paths - current_rel_paths:
+            self.db.conn.execute("DELETE FROM sync_failures WHERE path = ?", [stale_failure])
+
+        summary.finish()
+        self.db.record_sync(uuid.uuid4().hex, summary)
+        logger.info("Full sync complete (%s)", summary.status)
+        return summary
 
 
 class VaultWatchdogHandler(FileSystemEventHandler):

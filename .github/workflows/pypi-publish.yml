@@ -9,6 +9,7 @@ jobs:
   build-n-publish:
     name: Build and publish Python 🐍 distributions 📦 to PyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       id-token: write
       contents: read
@@ -38,10 +39,56 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run pytest -vv --durations=20
+
+      - name: Run VSS smoke test
+        run: uv run pytest -m vss -vv
 
       - name: Build distributions
         run: uv build
+
+      - name: Test clean wheel CLI
+        shell: bash
+        run: |
+          wheel_path="$(find dist -name '*.whl' -print -quit)"
+          smoke_env="${RUNNER_TEMP}/duckvault-wheel-smoke"
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" "$wheel_path"
+          uv run python .github/scripts/wheel_smoke.py \
+            "$smoke_env/bin/duckvault" "$(uv version --short)"
+
+      - name: Install wheel with CPU-only PyTorch
+        shell: bash
+        run: |
+          wheel_path="$(find dist -name '*.whl' -print -quit)"
+          offline_env="${RUNNER_TEMP}/duckvault-offline-e2e"
+          uv venv "$offline_env"
+          uv pip install --python "$offline_env/bin/python" torch \
+            --index https://download.pytorch.org/whl/cpu
+          uv pip install --python "$offline_env/bin/python" "$wheel_path"
+
+      - name: Prepare offline search assets
+        shell: bash
+        run: |
+          offline_env="${RUNNER_TEMP}/duckvault-offline-e2e"
+          offline_root="${RUNNER_TEMP}/duckvault-offline-root"
+          vault="${offline_root}/vault"
+          mkdir -p "$vault"
+          printf '# Offline release smoke\nLocal retrieval must work.\n' > "$vault/offline.md"
+          DUCKVAULT_HOME="${offline_root}/home" \
+            "$offline_env/bin/duckvault" init "$vault" --non-interactive --json
+
+      - name: Search with CPU-only wheel and no network
+        shell: bash
+        run: |
+          offline_env="${RUNNER_TEMP}/duckvault-offline-e2e"
+          offline_root="${RUNNER_TEMP}/duckvault-offline-root"
+          vault="${offline_root}/vault"
+          sudo --preserve-env=DUCKVAULT_HOME,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
+            env DUCKVAULT_HOME="${offline_root}/home" HF_HUB_OFFLINE=1 \
+            TRANSFORMERS_OFFLINE=1 unshare --net -- \
+            bash -c 'ip link set lo up; exec "$1" "$2" "$3"' bash \
+            "$offline_env/bin/python" .github/scripts/offline_search_smoke.py "$vault"
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

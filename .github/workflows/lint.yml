@@ -24,7 +24,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run black
-        run: uv run black --check src
+        run: uv run black --check src tests .github/scripts
 
       - name: Run isort
-        run: uv run isort --check-only src
+        run: uv run isort --check-only src tests .github/scripts

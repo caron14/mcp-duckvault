@@ -1,413 +1,244 @@
 # DuckVault-MCP
 
-DuckVault-MCP v0.3.0 is a local RAG server for Obsidian Vaults and Markdown
-knowledge bases. It combines DuckDB vector search, local GraphRAG, [Open Knowledge
-Format (OKF) support](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md), and an offline interactive graph viewer behind an MCP
-interface.
+[![PyPI version](https://img.shields.io/pypi/v/mcp-duckvault)](https://pypi.org/project/mcp-duckvault/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-duckvault)](https://pypi.org/project/mcp-duckvault/)
+[![License: MIT](https://img.shields.io/github/license/caron14/mcp-duckvault)](LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/mcp-duckvault)](https://pypi.org/project/mcp-duckvault/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-- [Quick Start](#quick-start--v030)
-- [Features](#features)
-- [CLI Reference](#cli-reference)
-- [MCP Tools](#mcp-tools)
-- [OKF Authoring](#okf-authoring)
-- [AI Agent Setup](#ai-agent-setup)
-- [Troubleshooting](#troubleshooting)
+DuckVault-MCP v0.4.0 is a local vector and graph RAG server for Obsidian Vaults
+and Markdown knowledge bases. Each Vault receives an isolated DuckDB index, and
+all MCP sessions for that Vault share one local daemon so DuckDB, WAL, VSS, the
+watcher, and the embedding model have a single owner.
 
-## Quick Start — v0.3.0
+## Quick start
 
-### 1. Prerequisites
+Requirements:
 
-- Python 3.11 or newer
-- [`uv`](https://docs.astral.sh/uv/)
-- An Obsidian Vault or directory containing Markdown files
-- An absolute path to that directory
+- Python 3.11–3.14
+- macOS, Linux, or Windows
+- an existing directory containing Markdown files
+- network access during the first `init` only
 
-### 2. Install
-
-From a local checkout:
-
-```bash
-git clone https://github.com/caron14/mcp-duckvault.git
-cd mcp-duckvault
-uv tool install .
-```
-
-Alternatively, install the packaged release:
+Install and initialize:
 
 ```bash
 uv tool install mcp-duckvault
+duckvault init /absolute/path/to/vault
 ```
 
-### 3. Run the first sync
+`init` installs the DuckDB VSS extension, downloads
+`intfloat/multilingual-e5-small`, creates a Vault-specific database, performs the
+first sync and an offline search smoke test, then writes a portable MCP server
+entry. Its location is printed as `mcp_config`.
 
-Use a dedicated database file for each Vault:
-
-```bash
-duckvault /absolute/path/to/vault \
-  --db-path ~/.duckvault/my-vault.db \
-  --sync-only
-```
-
-The first sync may download `intfloat/multilingual-e5-small`. Later starts load
-the model from `~/.duckvault/models` and only re-index changed Markdown files.
-
-### 4. Connect Claude Code
-
-```bash
-claude mcp add duckvault -- \
-  duckvault /absolute/path/to/vault \
-  --db-path ~/.duckvault/my-vault.db
-
-claude mcp list
-```
-
-The registered command performs an incremental sync before starting the MCP
-server. Running the first sync separately avoids a model download during the
-initial MCP connection.
-
-### 5. Try the retrieval tools
-
-Ask your AI agent:
-
-- “Find notes about customer revenue.”
-- “Find notes tagged `sales` that discuss orders.”
-- “Use `find_related_notes` for `tables/orders.md`.”
-- “Use `hybrid_search_notes` to find customer metrics and linked notes.”
-- “List OKF concepts with type `table` and tag `sales`.”
-- “Explain the OKF concept `tables/orders`.”
-
-### 6. Generate the offline graph viewer
-
-```bash
-duckvault /absolute/path/to/vault \
-  --db-path ~/.duckvault/my-vault.db \
-  --visualize \
-  --output ./duckvault-graph.html
-```
-
-This writes:
-
-```text
-duckvault-graph.html
-duckvault-graph.json
-```
-
-Open the HTML file in a modern browser. It contains the graph data and
-Cytoscape.js, requires no backend or network connection, and does not embed the
-Markdown bodies.
-
-## Features
-
-| Area | Capability |
-| --- | --- |
-| Vector RAG | Local E5 embeddings, DuckDB VSS, cosine similarity, optional tag filtering |
-| GraphRAG | Markdown links, Wiki links, headings, tags, folders, resources, and citations |
-| OKF | Concept detection, type/resource/tag metadata, reserved `index.md` and `log.md` files |
-| Hybrid retrieval | Vector seeds expanded through graph relationships and reranked |
-| Visualization | Self-contained HTML plus canonical JSON with search, filters, layouts, and diagnostics |
-| Indexing | MD5-based incremental sync, `.vaultignore`, filesystem watching |
-| Integration | MCP tools with direct Obsidian links |
-
-All indexed content and graph data remain local. Initial setup may download the
-DuckDB VSS extension and embedding model. The generated graph viewer makes no
-network requests; external resource links are opened only when selected.
-
-## How It Works
-
-1. DuckVault scans Markdown files, excluding configured paths.
-2. It parses YAML frontmatter, splits content at H1-H3 headings, and generates
-   local embeddings.
-3. It extracts document, link, heading, tag, folder, OKF type, resource, and
-   citation graph records into DuckDB.
-4. MCP tools query the vector index, traverse the graph, or combine both.
-5. Visualization mode exports the persisted graph without re-parsing Markdown.
-
-The existing `search_notes` vector behavior remains available alongside the
-GraphRAG and OKF tools.
-
-## CLI Reference
-
-```text
-duckvault [OPTIONS] VAULT_PATH
-```
-
-`VAULT_PATH` must be an existing directory. Absolute paths are strongly
-recommended, and are required in AI agent configuration.
-
-| Option | Description |
-| --- | --- |
-| `--db-path PATH` | DuckDB path. Default: `~/.duckvault/vault.db` |
-| `--sync-only` | Sync the Vault and exit without starting MCP |
-| `--visualize` | Sync, generate offline HTML/JSON, and exit |
-| `--output FILE` | Visualization HTML path. Default: `duckvault-graph.html` |
-| `--json-output FILE` | Override the JSON sidecar path |
-| `-v`, `--verbose` | Enable debug logging on stderr |
-
-### Common commands
-
-Start the MCP server and filesystem watcher:
-
-```bash
-duckvault /absolute/path/to/vault
-```
-
-Use a custom database:
-
-```bash
-duckvault /absolute/path/to/vault --db-path ./vault-index.db
-```
-
-Choose both visualization output paths:
-
-```bash
-duckvault /absolute/path/to/vault \
-  --visualize \
-  --output ./artifacts/graph.html \
-  --json-output ./artifacts/graph-data.json
-```
-
-## MCP Tools
-
-| Tool | Description |
-| --- | --- |
-| `search_notes(query, tag=None, limit=5)` | Vector similarity search with optional frontmatter tag filtering |
-| `list_recent_notes(days=7)` | Notes indexed within the requested number of days |
-| `find_related_notes(path, depth=1, limit=10)` | Related documents found by graph traversal |
-| `list_graph_neighbors(path, depth=1, limit=20)` | Neighboring documents and structural graph nodes |
-| `hybrid_search_notes(query, tag=None, limit=5, graph_depth=1)` | Vector results reranked with graph relationships |
-| `search_okf_concepts(okf_type=None, tag=None, limit=20)` | OKF concepts filtered by type and tag |
-| `explain_okf_concept(concept_id)` | Structured OKF metadata, links, resources, citations, and related notes |
-
-Hybrid results use:
-
-```text
-final_score = 0.7 * vector_similarity + 0.3 * graph_score
-graph_score = max(seed_vector_similarity / depth)
-```
-
-Document-oriented retrieval results include `obsidian://open` links.
-
-## Graph Visualization
-
-The viewer initially displays documents and document-to-document relationships.
-The sidebar can enable:
-
-- folders
-- headings
-- tags
-- OKF types
-- resources and citations
-- dangling link targets
-
-It also provides:
-
-- title, path, concept ID, and tag search
-- type, tag, directory, relation, and structural-node filters
-- force-directed, concentric, breadth-first, circle, and grid layouts
-- structured metadata and inbound/outbound relationships
-- Obsidian and validated HTTP/HTTPS resource links
-- orphan, dangling-link, duplicate-title, and high-degree diagnostics
-
-The HTML enforces a Content Security Policy that prevents external connections.
-The JSON sidecar uses schema version `1.0`.
-
-## OKF Authoring
-
-Any Markdown file with leading YAML frontmatter containing `type` is indexed as
-an OKF Concept Document.
-
-```markdown
----
-type: table
-title: Orders
-description: One row per customer order
-resource: https://console.example.com/warehouse/orders
-tags: [sales, finance]
-timestamp: 2026-07-01T00:00:00Z
----
-
-# Orders
-
-Each order belongs to a [customer](./customers.md).
-Revenue is defined by [weekly revenue](/metrics/weekly_revenue.md).
-```
-
-The Concept ID is the Vault-relative path without `.md`:
-
-```text
-tables/orders.md -> tables/orders
-```
-
-Link resolution:
-
-| Link | Resolution |
-| --- | --- |
-| `/tables/customers.md` | Vault root |
-| `./customers.md` | Current document directory |
-| `../metrics/revenue.md` | Relative parent directory |
-| `https://example.com/spec` | External citation |
-| Missing local target | Retained as a dangling graph node |
-
-`index.md` and `log.md` are stored as navigation/history nodes, not OKF
-concepts. Frontmatter fields beyond the standard OKF fields remain available in
-node metadata.
-
-### Graph mapping
-
-| Markdown/OKF element | Graph representation |
-| --- | --- |
-| Markdown file | `document`, `okf_concept`, `okf_index`, or `okf_log` node |
-| H1-H3 heading | `heading` node and `HAS_HEADING` edge |
-| Frontmatter or inline tag | `tag` node and `HAS_TAG` edge |
-| Wiki/Markdown link | `LINKS_TO` or `MENTIONS_LINK` edge |
-| Directory | `folder` node and `CONTAINS` edge |
-| OKF `type` | `okf_type` node and `HAS_TYPE` edge |
-| OKF `resource` | `resource` node and `DESCRIBES_RESOURCE` edge |
-| External URL | `citation` node and `CITES_SOURCE` edge |
-
-## AI Agent Setup
-
-Use the same absolute Vault path and database path in every configuration.
-
-### Claude Code
-
-```bash
-claude mcp add duckvault -- \
-  duckvault /absolute/path/to/vault \
-  --db-path /absolute/path/to/duckvault.db
-```
-
-### Claude Desktop
-
-Add this entry to the `mcpServers` object in
-`~/Library/Application Support/Claude/claude_desktop_config.json`:
+The generated entry is equivalent to:
 
 ```json
 {
   "mcpServers": {
     "duckvault": {
       "command": "duckvault",
-      "args": [
-        "/absolute/path/to/vault",
-        "--db-path",
-        "/absolute/path/to/duckvault.db"
-      ]
+      "args": ["serve", "/absolute/path/to/vault"]
     }
   }
 }
 ```
 
-### Gemini CLI
+After initialization, normal MCP startup and search use cached assets only and
+do not install extensions or download models.
 
-```bash
-gemini mcp add --scope user duckvault \
-  duckvault /absolute/path/to/vault \
-  --db-path /absolute/path/to/duckvault.db
-```
+## CLI
 
-Verify with:
-
-```bash
-gemini mcp list
-```
-
-### GitHub Copilot CLI
-
-Start Copilot, run `/mcp add`, and register:
+v0.4 uses explicit subcommands. The pre-v0.4 form `duckvault VAULT_PATH` is no
+longer accepted.
 
 ```text
-name: duckvault
-command: duckvault
-args: /absolute/path/to/vault --db-path /absolute/path/to/duckvault.db
+duckvault init VAULT_PATH [--non-interactive] [--json]
+duckvault serve VAULT_PATH
+duckvault sync VAULT_PATH [--json]
+duckvault sync VAULT_PATH --dry-run [--json]
+duckvault status VAULT_PATH [--json]
+duckvault doctor VAULT_PATH [--json]
+duckvault daemon start|stop|restart|status VAULT_PATH
+duckvault migrate-legacy VAULT_PATH [--legacy-db PATH]
+duckvault reindex VAULT_PATH [--json]
+duckvault explain-ignore VAULT_PATH PATH [--json]
+duckvault visualize VAULT_PATH [--output FILE]
+duckvault --version
 ```
 
-## Configuration
+Normally no database path is needed. DuckVault derives one from the normalized
+Vault path:
 
-### Database and model cache
+```text
+~/.duckvault/
+├── models/
+└── vaults/<vault-id>/
+    ├── vault.db
+    ├── endpoint.json
+    ├── owner.lock
+    ├── startup.lock
+    ├── daemon.log
+    ├── mcp-server.json
+    └── backups/
+```
 
-| Data | Default location |
+An advanced `--db-path` override remains available. DuckVault stores the Vault
+identity in every database and refuses a mismatched database before indexing or
+deleting anything.
+
+### Status and synchronization failures
+
+```bash
+duckvault sync /absolute/path/to/vault --json
+duckvault status /absolute/path/to/vault --json
+```
+
+A sync reports `scanned`, `indexed`, `skipped`, `deleted`, `failed`, and
+`excluded`. Exit status is `0` for complete, `2` for partial success, and `1`
+for failure. Current file failures are retained with a stable error code and
+timestamp and are cleared after a successful retry. Note bodies are never
+written to logs or failure records.
+
+### Diagnostics
+
+```bash
+duckvault doctor /absolute/path/to/vault
+duckvault doctor /absolute/path/to/vault --json
+```
+
+`doctor` checks Python, DuckDB VSS, the model cache, the database, Vault
+permissions, Vault identity, daemon health, watcher ownership, and offline
+readiness. Failed checks include a concrete repair command.
+
+### Legacy database migration
+
+Pre-v0.4 used the shared `~/.duckvault/vault.db`, which has no reliable Vault
+identity. DuckVault therefore does not copy its index into a new Vault:
+
+```bash
+duckvault migrate-legacy /absolute/path/to/vault
+```
+
+The command checkpoints and backs up the legacy DB, leaves the source intact,
+and rebuilds a new Vault-specific index with the current parser, graph extractor,
+and embedding configuration. Do not delete the old DB until the new status and
+search results have been verified.
+
+Versioned schema migrations create a checkpointed backup in `backups/` before
+running in a transaction. If the parser, model, or embedding dimension changes,
+rebuild the index while the daemon is stopped:
+
+```bash
+duckvault daemon stop /absolute/path/to/vault
+duckvault reindex /absolute/path/to/vault --json
+```
+
+The replacement is built in a separate database and installed only after a
+complete sync. A failed rebuild leaves the original database and backup intact;
+`status` and `doctor` report the recovery command.
+
+## Shared daemon and recovery
+
+`duckvault serve` is a small stdio MCP proxy. It connects to an authenticated
+loopback endpoint and starts the Vault daemon if needed. Kernel-backed owner and
+startup locks ensure that concurrent MCP sessions still create only one owner.
+All database work is serialized through that daemon.
+
+The daemon exposes these states: `starting`, `preparing`, `syncing`, `ready`,
+`degraded`, `reindex_required`, and `stopping`. Health and status remain
+available while preparation or synchronization is running.
+
+Useful recovery commands:
+
+```bash
+duckvault daemon status /absolute/path/to/vault
+duckvault daemon restart /absolute/path/to/vault
+duckvault doctor /absolute/path/to/vault
+```
+
+After SIGTERM or Ctrl+C, the daemon drains queued work, checkpoints and closes
+DuckDB, and removes its endpoint. After an unclean exit, kernel locks are
+released by the OS and the next proxy replaces stale endpoint metadata.
+
+## MCP tools
+
+| Tool | Description |
 | --- | --- |
-| DuckDB index | `~/.duckvault/vault.db` |
-| Sentence Transformers cache | `~/.duckvault/models` |
+| `search_notes(query, tag=None, limit=5)` | Vector similarity search |
+| `list_recent_notes(days=7, limit=20)` | Notes recently modified on disk |
+| `find_related_notes(path, depth=1, limit=10)` | Related graph documents |
+| `list_graph_neighbors(path, depth=1, limit=20)` | Neighboring graph nodes |
+| `hybrid_search_notes(query, tag=None, limit=5, graph_depth=1)` | Vector plus graph retrieval |
+| `search_okf_concepts(okf_type=None, tag=None, limit=20)` | OKF concept search |
+| `explain_okf_concept(concept_id)` | OKF metadata and relationships |
+| `get_index_status(include_failures=False, failure_limit=100)` | Readiness, completeness, and failures |
 
-Use a separate `--db-path` for each Vault. Synchronizing an unrelated Vault
-against the same database replaces the indexed document set.
+Search results include `obsidian://open` links. Markdown frontmatter, H1–H3
+headings, Markdown/Wiki links, tags, folders, resources, citations, and OKF
+concept metadata are represented in the local graph.
 
-### Excluding files
+All MCP tools return versioned structured data. Retrieval responses contain
+`schema_version`, `tool`, `count`, and `items`; errors expose a stable `code`,
+`message`, and `retryable` flag. Limits are bounded to 100 results, graph depth
+to 5, and snippets to 2,000 characters.
 
-Create `.vaultignore` at the Vault root. Patterns use glob matching.
-`.obsidian` and `.trash` are always excluded.
+## Exclusions and visualization
 
-```text
-# Directories
-private/
-drafts/
+`.obsidian` and `.trash` are excluded by default. Add patterns to
+`VAULT_PATH/.vaultignore`, one per line. Current matching supports simple glob
+patterns but is not fully gitignore-compatible.
 
-# File patterns
-archive-*.md
-```
-
-## Troubleshooting
-
-### The first start is slow
-
-The embedding model is loaded lazily and tried from the local cache first. If it
-is not cached, DuckVault downloads it from Hugging Face. Run `--sync-only`
-before registering MCP to complete this step separately.
-
-### MCP fails to connect
-
-- Confirm `duckvault` is available in the same environment as the AI agent.
-- Use absolute Vault and database paths.
-- Run the configured command manually with `--sync-only`.
-- Add `--verbose`; logs are written to stderr so MCP stdout remains valid.
-
-### Notes or graph records look stale
-
-DuckVault normally re-indexes files when their MD5 changes. If parsing, schema,
-or embedding configuration changed between versions, remove the affected
-database and run a full sync again:
+Preview a sync without loading the model or changing the database, and inspect
+why a path is excluded:
 
 ```bash
-rm ~/.duckvault/my-vault.db
-duckvault /absolute/path/to/vault \
-  --db-path ~/.duckvault/my-vault.db \
-  --sync-only
+duckvault sync /absolute/path/to/vault --dry-run --json
+duckvault explain-ignore /absolute/path/to/vault private/note.md --json
 ```
 
-Back up the database first if it is needed for diagnostics.
+Markdown files larger than 10 MiB fail safely without replacing their previous
+index entry. Configure the limit with `--max-file-size BYTES` or
+`DUCKVAULT_MAX_MARKDOWN_BYTES`. File and directory symlinks are not followed;
+Vault-external targets are never indexed.
 
-### The graph viewer is empty
+Stop the daemon before reading the DB for a graph export:
 
-- Confirm the sync completed successfully.
-- Check that Markdown files are not excluded by `.vaultignore`.
-- Verify that HTML and JSON output paths differ.
-- Inspect the JSON sidecar to confirm `stats.documents` is greater than zero.
+```bash
+duckvault daemon stop /absolute/path/to/vault
+duckvault visualize /absolute/path/to/vault --output duckvault-graph.html
+```
 
-### Broken links appear in diagnostics
+The HTML viewer is self-contained, makes no network requests, and does not embed
+Markdown bodies. A versioned JSON sidecar is generated beside it.
 
-This is expected for unresolved local links. DuckVault preserves them as
-`link_target` nodes so they can be found and repaired.
+## Privacy, backup, and upgrades
+
+- Vault contents, chunks, embeddings, graph data, and metadata are stored in
+  plaintext DuckDB files. Anyone who can read the database can inspect them.
+- DuckVault applies private POSIX permissions (`0700` directories and `0600`
+  databases/configuration) where supported. Windows ACLs remain controlled by
+  the user account and parent directory.
+- Back up the Vault and its `~/.duckvault/vaults/<vault-id>/` directory together.
+- Schema and index configuration versions are stored in `system_config`. A
+  changed parser/model signature marks the index for rebuilding instead of
+  silently reusing incompatible embeddings.
+- Legacy migration creates a checkpointed backup before rebuilding. A database
+  with a newer unsupported schema is rejected rather than modified.
 
 ## Development
 
 ```bash
 uv sync --all-extras
 uv run pytest
-uv run black --check src tests
-uv run isort --check-only src tests
+uv run black --check src tests .github/scripts
+uv run isort --check-only src tests .github/scripts
 ```
 
-The functional source of truth is [SPECIFICATION.md](SPECIFICATION.md).
-
-## Current Scope
-
-v0.3.0 does not include LLM entity extraction, community detection, community
-summaries, Global GraphRAG, Neo4j export, GraphML/CSV export, or CI-enforced
-graph quality gates.
+CI runs pytest on Python 3.11–3.14 on Linux and representative macOS/Windows
+versions, plus a clean wheel CLI smoke test.
 
 ## License
 
-DuckVault-MCP is released under the MIT License. The bundled Cytoscape.js
-library is also MIT-licensed; its license text is included at
-`src/mcp_duckvault/assets/CYTOSCAPE_LICENSE.txt`.
+MIT. The offline viewer bundles Cytoscape.js under its included license.

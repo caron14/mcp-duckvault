@@ -1,6 +1,5 @@
 """Integration tests for graph updates in the vault indexer."""
 
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.indexer import VaultIndexer
 
 
@@ -9,14 +8,13 @@ class FakeEmbeddingModel:
         return [[float(len(text)), 0.0, 0.0, 1.0] for text in texts]
 
 
-def test_index_update_and_delete_are_atomic_for_graph_data(tmp_path):
+def test_index_update_and_delete_are_atomic_for_graph_data(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     note = vault / "note.md"
     note.write_text("---\ntype: concept\ntags: [one]\n---\n# Old\nBody", encoding="utf-8")
 
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     indexer = VaultIndexer(str(vault), db, model=FakeEmbeddingModel())
     indexer.index_file(str(note))
 
