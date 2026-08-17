@@ -406,7 +406,7 @@ def visualize_command(
             if exc.code != "DAEMON_NOT_RUNNING" and exc.code != "DAEMON_UNREACHABLE":
                 raise
         db = DatabaseManager(_db_path(layout, db_path), identity=layout.identity, read_only=True)
-        db.connect()
+        db.connect(load_vss=False)
         db.verify_vault_identity()
         html_path, graph_path = write_graph_visualization(
             GraphRepository(db), str(layout.identity.normalized_path), output, json_output

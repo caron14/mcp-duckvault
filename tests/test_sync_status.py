@@ -1,6 +1,5 @@
 """Synchronization aggregation and failure visibility tests."""
 
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.indexer import VaultIndexer
 
 
@@ -9,13 +8,12 @@ class FakeEmbeddingModel:
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
 
 
-def test_full_sync_reports_partial_and_persists_safe_failure(tmp_path):
+def test_full_sync_reports_partial_and_persists_safe_failure(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "good.md").write_text("# Good\nBody", encoding="utf-8")
     (vault / "bad.md").write_bytes(b"\xff\xfe")
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
 
     summary = VaultIndexer(str(vault), db, model=FakeEmbeddingModel()).full_sync()
 
@@ -30,13 +28,12 @@ def test_full_sync_reports_partial_and_persists_safe_failure(tmp_path):
     assert "Body" not in str(status["failures"])
 
 
-def test_successful_retry_clears_current_failure(tmp_path):
+def test_successful_retry_clears_current_failure(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     note = vault / "note.md"
     note.write_bytes(b"\xff")
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     indexer = VaultIndexer(str(vault), db, model=FakeEmbeddingModel())
     assert indexer.full_sync().status == "failed"
 
@@ -45,13 +42,12 @@ def test_successful_retry_clears_current_failure(tmp_path):
     assert db.status()["failures"] == []
 
 
-def test_deleting_never_indexed_failure_clears_it(tmp_path):
+def test_deleting_never_indexed_failure_clears_it(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     note = vault / "bad.md"
     note.write_bytes(b"\xff")
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     indexer = VaultIndexer(str(vault), db, model=FakeEmbeddingModel())
     assert indexer.full_sync().status == "failed"
 

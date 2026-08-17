@@ -7,7 +7,6 @@ import time
 import pytest
 
 from mcp_duckvault.daemon import DaemonClient, DuckVaultDaemon, ensure_daemon
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.errors import DuckVaultError
 from mcp_duckvault.indexer import VaultIndexer
 from mcp_duckvault.vault_identity import VaultLayout
@@ -27,20 +26,18 @@ def test_daemon_requires_explicit_initialization(tmp_path, monkeypatch):
         ensure_daemon(VaultLayout.for_vault(vault), timeout=0.1)
 
 
-def test_three_clients_share_one_daemon(tmp_path, monkeypatch):
+def test_three_clients_share_one_daemon(tmp_path, monkeypatch, database_factory):
     monkeypatch.setenv("DUCKVAULT_HOME", str(tmp_path / "home"))
     vault = tmp_path / "vault"
     vault.mkdir()
     layout = VaultLayout.for_vault(vault, create=True)
-    DatabaseManager.prepare_vss(str(layout.db_path))
-    db = DatabaseManager(str(layout.db_path), identity=layout.identity)
-    db.initialize_schema()
+    db = database_factory(str(layout.db_path), identity=layout.identity, embedding_dim=384)
     note = vault / "note.md"
     note.write_text("# Concurrent watcher update", encoding="utf-8")
     VaultIndexer(str(vault), db, model=FakeEmbeddingModel()).full_sync()
     db.close()
 
-    daemon = DuckVaultDaemon(layout)
+    daemon = DuckVaultDaemon(layout, load_vss=False)
     thread = threading.Thread(target=daemon.run)
     thread.start()
     client = DaemonClient(layout, timeout=2)

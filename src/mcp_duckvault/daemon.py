@@ -142,9 +142,10 @@ class _QueueWatchdogHandler(FileSystemEventHandler):
 class DaemonWorker:
     """Single thread that owns DuckDB, VSS, model, watcher, and all operations."""
 
-    def __init__(self, layout: VaultLayout, db_path: str):
+    def __init__(self, layout: VaultLayout, db_path: str, *, load_vss: bool = True):
         self.layout = layout
         self.db_path = db_path
+        self.load_vss = load_vss
         self.jobs: queue.Queue[tuple[str, dict[str, object], Future[Any] | None] | None] = (
             queue.Queue()
         )
@@ -229,7 +230,7 @@ class DaemonWorker:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         model = EmbeddingModel(allow_download=False)
         db = DatabaseManager(self.db_path, identity=self.layout.identity)
-        db.connect()
+        db.connect(load_vss=self.load_vss)
         db.initialize_schema(embedding_dim=model.dimension, model_id=model.model_name)
         self.set_index_status(db.status())
         if db._config("index_state") == "reindex_required":
@@ -375,11 +376,17 @@ class _RpcServer(socketserver.ThreadingTCPServer):
 
 
 class DuckVaultDaemon:
-    def __init__(self, layout: VaultLayout, db_path: str | None = None):
+    def __init__(
+        self,
+        layout: VaultLayout,
+        db_path: str | None = None,
+        *,
+        load_vss: bool = True,
+    ):
         self.layout = layout
         self.db_path = db_path or str(layout.db_path)
         self.token = secrets.token_urlsafe(32)
-        self.worker = DaemonWorker(layout, self.db_path)
+        self.worker = DaemonWorker(layout, self.db_path, load_vss=load_vss)
         self.server = _RpcServer(("127.0.0.1", 0), _RpcHandler)
         self.server.daemon_controller = self  # type: ignore[attr-defined]
         self._shutdown_started = False

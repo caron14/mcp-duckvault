@@ -1,11 +1,10 @@
 """Tests for graph persistence, traversal, filtering, and cleanup."""
 
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.graph_extractor import GraphExtractor
 from mcp_duckvault.graph_repository import GraphRepository
 
 
-def test_repository_persists_and_queries_okf_graph(tmp_path):
+def test_repository_persists_and_queries_okf_graph(tmp_path, database_factory):
     vault = tmp_path / "vault"
     (vault / "tables").mkdir(parents=True)
     orders_path = vault / "tables" / "orders.md"
@@ -31,8 +30,7 @@ def test_repository_persists_and_queries_okf_graph(tmp_path):
         "# Customers",
     )
 
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     repository = GraphRepository(db)
     repository.upsert_document_graph("tables/orders.md", orders)
     repository.upsert_document_graph("tables/customers.md", customers)
@@ -61,9 +59,8 @@ def test_repository_persists_and_queries_okf_graph(tmp_path):
     assert repository.find_okf_concept("tables/customers") is not None
 
 
-def test_garbage_collection_removes_unreferenced_shared_nodes():
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+def test_garbage_collection_removes_unreferenced_shared_nodes(database_factory):
+    db = database_factory()
     repository = GraphRepository(db)
     graph = GraphExtractor().extract("note.md", {"tags": ["temporary"]}, "")
     repository.upsert_document_graph("note.md", graph)

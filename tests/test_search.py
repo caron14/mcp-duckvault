@@ -3,20 +3,15 @@
 import json
 import urllib.parse
 
-import pytest
 
-from mcp_duckvault.db_manager import DatabaseManager
-
-
-def test_tag_filtering_logic():
+def test_tag_filtering_logic(database_factory):
     """Tests the SQL logic for filtering documents by tags in various formats."""
     # Test cases for frontmatter tag formats
     # d.metadata->'$.tags' ? ? OR d.metadata->'$.tag' = ? ...
     # We'll test if the SQL logic we implemented matches expectations
     # But since it's SQL, we should ideally run it against a real DuckDB
 
-    db = DatabaseManager(":memory:")
-    db.initialize_schema()
+    db = database_factory(embedding_dim=384)
 
     # Insert test data
     test_data = [

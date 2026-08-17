@@ -5,7 +5,6 @@ import json
 from click.testing import CliRunner
 
 from mcp_duckvault import cli
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.graph_extractor import GraphExtractor
 from mcp_duckvault.graph_repository import GraphRepository
 from mcp_duckvault.graph_visualizer import (
@@ -17,14 +16,13 @@ from mcp_duckvault.indexer import VaultIndexer
 from mcp_duckvault.vault_identity import VaultIdentity
 
 
-def _visualization_repository(tmp_path):
+def _visualization_repository(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     for name in ("orders.md", "customers.md", "isolated.md"):
         (vault / name).write_text("", encoding="utf-8")
 
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     repository = GraphRepository(db)
     extractor = GraphExtractor(str(vault))
     documents = [
@@ -54,8 +52,8 @@ def _visualization_repository(tmp_path):
     return vault, repository
 
 
-def test_build_graph_snapshot_and_diagnostics(tmp_path):
-    vault, repository = _visualization_repository(tmp_path)
+def test_build_graph_snapshot_and_diagnostics(tmp_path, database_factory):
+    vault, repository = _visualization_repository(tmp_path, database_factory)
 
     snapshot = build_graph_snapshot(repository, vault, generated_at="2026-07-01T00:00:00+00:00")
 
@@ -80,8 +78,8 @@ def test_build_graph_snapshot_and_diagnostics(tmp_path):
     assert snapshot["diagnostics"]["high_degree_nodes"][0]["degree"] == 1
 
 
-def test_rendered_html_is_offline_and_escapes_embedded_data(tmp_path):
-    vault, repository = _visualization_repository(tmp_path)
+def test_rendered_html_is_offline_and_escapes_embedded_data(tmp_path, database_factory):
+    vault, repository = _visualization_repository(tmp_path, database_factory)
     snapshot = build_graph_snapshot(repository, vault)
     snapshot["nodes"][0]["label"] = "</script><script>alert('xss')</script>"
 
@@ -97,8 +95,8 @@ def test_rendered_html_is_offline_and_escapes_embedded_data(tmp_path):
     assert "Permission is hereby granted, free of charge" in html
 
 
-def test_write_graph_visualization_creates_html_and_json(tmp_path):
-    vault, repository = _visualization_repository(tmp_path)
+def test_write_graph_visualization_creates_html_and_json(tmp_path, database_factory):
+    vault, repository = _visualization_repository(tmp_path, database_factory)
     html_path = tmp_path / "output" / "graph.html"
 
     written_html, written_json = write_graph_visualization(repository, vault, html_path)
@@ -111,7 +109,9 @@ def test_write_graph_visualization_creates_html_and_json(tmp_path):
     assert graph["stats"]["documents"] == 3
 
 
-def test_visualize_cli_writes_artifacts_from_initialized_db(tmp_path, monkeypatch):
+def test_visualize_cli_writes_artifacts_from_initialized_db(
+    tmp_path, monkeypatch, database_factory
+):
     class FakeEmbeddingModel:
         dimension = 4
 
@@ -126,8 +126,7 @@ def test_visualize_cli_writes_artifacts_from_initialized_db(tmp_path, monkeypatc
     html_path = tmp_path / "artifacts" / "graph.html"
     monkeypatch.setenv("DUCKVAULT_HOME", str(tmp_path / "home"))
     db_path = tmp_path / "vault.db"
-    db = DatabaseManager(str(db_path), identity=VaultIdentity.from_path(vault))
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory(str(db_path), identity=VaultIdentity.from_path(vault), embedding_dim=4)
     VaultIndexer(str(vault), db, model=FakeEmbeddingModel()).full_sync()
     db.close()
 

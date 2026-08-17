@@ -3,7 +3,6 @@
 import asyncio
 import json
 
-from mcp_duckvault.db_manager import DatabaseManager
 from mcp_duckvault.graph_extractor import GraphExtractor
 from mcp_duckvault.graph_repository import GraphRepository
 from mcp_duckvault.mcp_server import create_mcp_server
@@ -14,14 +13,13 @@ class QueryModel:
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
 
 
-def test_graph_and_hybrid_mcp_tools(tmp_path):
+def test_graph_and_hybrid_mcp_tools(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "orders.md").write_text("", encoding="utf-8")
     (vault / "customers.md").write_text("", encoding="utf-8")
 
-    db = DatabaseManager(":memory:")
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory()
     extractor = GraphExtractor(str(vault))
     repository = GraphRepository(db)
     documents = [

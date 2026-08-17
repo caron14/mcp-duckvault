@@ -39,44 +39,43 @@ def test_layout_separates_different_vaults(tmp_path, monkeypatch):
     assert first_layout.db_path != second_layout.db_path
 
 
-def test_database_rejects_another_vault_before_schema_write(tmp_path):
+def test_database_rejects_another_vault_before_schema_write(tmp_path, database_factory):
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
     db_path = tmp_path / "shared.db"
 
-    db = DatabaseManager(str(db_path), identity=VaultIdentity.from_path(first))
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory(str(db_path), identity=VaultIdentity.from_path(first))
     db.close()
 
     wrong = DatabaseManager(str(db_path), identity=VaultIdentity.from_path(second))
     with pytest.raises(VaultIdentityError):
+        wrong.connect(load_vss=False)
         wrong.initialize_schema(embedding_dim=4)
 
 
-def test_database_rejects_newer_schema(tmp_path):
+def test_database_rejects_newer_schema(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     db_path = tmp_path / "vault.db"
     identity = VaultIdentity.from_path(vault)
-    db = DatabaseManager(str(db_path), identity=identity)
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory(str(db_path), identity=identity)
     db.set_config("schema_version", 999)
     db.close()
 
     newer = DatabaseManager(str(db_path), identity=identity)
     with pytest.raises(DuckVaultError, match="newer than supported"):
+        newer.connect(load_vss=False)
         newer.initialize_schema(embedding_dim=4)
 
 
-def test_checkpointed_backup_preserves_source_and_contents(tmp_path):
+def test_checkpointed_backup_preserves_source_and_contents(tmp_path, database_factory):
     vault = tmp_path / "vault"
     vault.mkdir()
     db_path = tmp_path / "vault.db"
     backup_path = tmp_path / "backups" / "vault.db"
-    db = DatabaseManager(str(db_path), identity=VaultIdentity.from_path(vault))
-    db.initialize_schema(embedding_dim=4)
+    db = database_factory(str(db_path), identity=VaultIdentity.from_path(vault))
     db.conn.execute("INSERT INTO documents (path, md5, metadata) VALUES ('note.md', 'hash', '{}')")
 
     db.backup(backup_path)

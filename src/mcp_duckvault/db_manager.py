@@ -56,6 +56,7 @@ class DatabaseManager:
         self.identity = identity
         self.read_only = read_only
         self.conn: duckdb.DuckDBPyConnection | None = None
+        self._vss_loaded = False
 
     @staticmethod
     def prepare_vss(db_path: str) -> None:
@@ -84,6 +85,7 @@ class DatabaseManager:
                         raise
                     self.conn.execute("INSTALL vss")
                     self.conn.execute("LOAD vss")
+                self._vss_loaded = True
                 try:
                     self.conn.execute("SET hnsw_enable_experimental_persistence = true")
                 except Exception as exc:
@@ -261,17 +263,18 @@ class DatabaseManager:
             )
         """)
 
-        try:
-            existing = self.conn.execute(
-                "SELECT 1 FROM duckdb_indexes() WHERE index_name = 'chunk_vec_idx'"
-            ).fetchone()
-            if not existing:
-                self.conn.execute(
-                    "CREATE INDEX chunk_vec_idx ON chunks USING HNSW (embedding) "
-                    "WITH (metric = 'cosine')"
-                )
-        except Exception as exc:
-            logger.warning("Could not create HNSW index (%s)", type(exc).__name__)
+        if self._vss_loaded:
+            try:
+                existing = self.conn.execute(
+                    "SELECT 1 FROM duckdb_indexes() WHERE index_name = 'chunk_vec_idx'"
+                ).fetchone()
+                if not existing:
+                    self.conn.execute(
+                        "CREATE INDEX chunk_vec_idx ON chunks USING HNSW (embedding) "
+                        "WITH (metric = 'cosine')"
+                    )
+            except Exception as exc:
+                logger.warning("Could not create HNSW index (%s)", type(exc).__name__)
 
         previous_signature = self._config("index_signature")
         self.set_config("schema_version", SCHEMA_VERSION)
@@ -377,6 +380,7 @@ class DatabaseManager:
         if self.conn is not None:
             self.conn.close()
             self.conn = None
+            self._vss_loaded = False
             logger.info("Database connection closed")
 
 
