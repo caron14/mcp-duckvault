@@ -86,6 +86,54 @@ def test_schema_migration_creates_backup_and_preserves_data(tmp_path):
     assert str(backups[0]) == backup
 
 
+def test_pre_versioned_database_fixture_upgrades_through_every_migration(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    identity = VaultIdentity.from_path(vault)
+    db_path = tmp_path / "vault.db"
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE TABLE system_config (key VARCHAR PRIMARY KEY, value VARCHAR)")
+    conn.executemany(
+        "INSERT INTO system_config VALUES (?, ?)",
+        {
+            "vault_id": identity.vault_id,
+            "vault_path": str(identity.normalized_path),
+            "embedding_dimension": "4",
+            "embedding_model_id": "test/old-model",
+            "index_signature": "old-signature",
+        }.items(),
+    )
+    conn.execute("""
+        CREATE TABLE documents (
+            path VARCHAR PRIMARY KEY,
+            md5 VARCHAR,
+            metadata JSON,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE chunks (
+            chunk_id VARCHAR PRIMARY KEY,
+            document_path VARCHAR,
+            content TEXT,
+            embedding FLOAT[4],
+            metadata JSON
+        )
+    """)
+    conn.execute("INSERT INTO documents (path, md5, metadata) VALUES ('old.md', 'old', '{}')")
+    conn.close()
+
+    db = DatabaseManager(str(db_path), identity=identity)
+    db.connect(load_vss=False)
+    db.initialize_schema(embedding_dim=4, model_id="test/old-model")
+
+    assert db._config("schema_version") == str(SCHEMA_VERSION)
+    assert db._column_exists("documents", "source_modified_at")
+    assert db._column_exists("documents", "index_signature")
+    assert db.conn.execute("SELECT path FROM documents").fetchone() == ("old.md",)
+    assert len(list((tmp_path / "backups").glob("schema-v0-to-v2-*.db"))) == 1
+
+
 def test_failed_migration_rolls_back_and_can_be_retried(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -185,3 +233,11 @@ def test_failed_reindex_preserves_old_index_and_recovery_details(
     assert status["reindex"]["required"] is True
     assert status["reindex"]["backup"]
     assert status["reindex"]["repair"] == f"duckvault reindex {vault}"
+    preserved.close()
+
+    retry = cli._reindex_vault(str(vault), model=FakeEmbeddingModel(dimension=8), load_vss=False)
+    assert retry["status"] == "complete"
+    rebuilt = DatabaseManager(str(layout.db_path), identity=layout.identity)
+    rebuilt.connect(load_vss=False)
+    assert rebuilt._config("index_state") == "ready"
+    assert rebuilt.conn.execute("SELECT path FROM documents").fetchone() == ("note.md",)

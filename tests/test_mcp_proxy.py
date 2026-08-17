@@ -50,9 +50,7 @@ def test_proxy_preserves_structured_daemon_error_fields():
     server = create_proxy_server(FailingClient())
     with pytest.raises(ToolError) as caught:
         asyncio.run(
-            server._tool_manager.call_tool(
-                "search_notes", {"query": "test"}, convert_result=False
-            )
+            server._tool_manager.call_tool("search_notes", {"query": "test"}, convert_result=False)
         )
 
     message = str(caught.value)

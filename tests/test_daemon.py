@@ -1,12 +1,13 @@
 """Local daemon ownership and concurrent-client tests."""
 
 import concurrent.futures
+import queue
 import threading
 import time
 
 import pytest
 
-from mcp_duckvault.daemon import DaemonClient, DuckVaultDaemon, ensure_daemon
+from mcp_duckvault.daemon import DaemonClient, DaemonWorker, DuckVaultDaemon, ensure_daemon
 from mcp_duckvault.errors import DuckVaultError
 from mcp_duckvault.indexer import VaultIndexer
 from mcp_duckvault.vault_identity import VaultLayout
@@ -83,7 +84,7 @@ def test_three_clients_share_one_daemon(tmp_path, monkeypatch, database_factory)
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if "No notes modified" in client.call("tool:list_recent_notes", {"days": 7}):
+        if client.call("tool:list_recent_notes", {"days": 7})["count"] == 0:
             break
         time.sleep(0.05)
     else:
@@ -92,3 +93,27 @@ def test_three_clients_share_one_daemon(tmp_path, monkeypatch, database_factory)
     thread.join(timeout=10)
     assert not thread.is_alive()
     assert not layout.endpoint_path.exists()
+
+
+def test_worker_shutdown_timeout_is_not_reported_as_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("DUCKVAULT_HOME", str(tmp_path / "home"))
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    worker = DaemonWorker(VaultLayout.for_vault(vault), ":memory:", load_vss=False)
+
+    class NeverStops:
+        def join(self, timeout=None):
+            del timeout
+
+        def is_alive(self):
+            return True
+
+    worker.thread = NeverStops()
+    worker.jobs = queue.Queue()
+
+    with pytest.raises(DuckVaultError) as caught:
+        worker.stop(timeout=0)
+
+    assert caught.value.code == "SHUTDOWN_TIMEOUT"
+    assert worker.snapshot()["state"] == "shutdown_failed"
+    assert worker.snapshot()["error"]["retryable"] is True

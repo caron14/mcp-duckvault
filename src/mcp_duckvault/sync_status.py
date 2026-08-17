@@ -68,3 +68,40 @@ class SyncSummary:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "failures": [failure.as_dict() for failure in self.failures],
         }
+
+
+@dataclass
+class SyncPlan:
+    """Read-only preview of one full synchronization."""
+
+    scanned: int = 0
+    indexed: int = 0
+    skipped: int = 0
+    deleted: int = 0
+    failed: int = 0
+    excluded: int = 0
+    total_bytes: int = 0
+    paths: dict[str, list[str]] = field(
+        default_factory=lambda: {
+            "indexed": [],
+            "skipped": [],
+            "deleted": [],
+            "failed": [],
+            "excluded": [],
+        }
+    )
+    reasons: dict[str, str] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": "planned",
+            "scanned": self.scanned,
+            "indexed": self.indexed,
+            "skipped": self.skipped,
+            "deleted": self.deleted,
+            "failed": self.failed,
+            "excluded": self.excluded,
+            "total_bytes": self.total_bytes,
+            "paths": self.paths,
+            "reasons": self.reasons,
+        }

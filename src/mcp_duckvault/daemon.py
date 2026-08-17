@@ -223,6 +223,14 @@ class DaemonWorker:
         self.set_state("stopping")
         self.jobs.put(None)
         self.thread.join(timeout=timeout)
+        if self.thread.is_alive():
+            error = DuckVaultError(
+                "SHUTDOWN_TIMEOUT",
+                "Database worker did not finish checkpointing before the shutdown timeout.",
+                retryable=True,
+            )
+            self.set_state("shutdown_failed", error.as_dict())
+            raise error
 
     def _initialize(self) -> tuple[DatabaseManager, VaultIndexer, Any]:
         self.set_state("preparing")
@@ -272,6 +280,14 @@ class DaemonWorker:
                 try:
                     if operation == "sync":
                         self.set_state("syncing")
+                        configured_limit = params.get("max_file_size")
+                        if configured_limit is not None:
+                            configured_limit = int(configured_limit)
+                            if configured_limit < 1:
+                                raise DuckVaultError(
+                                    "INVALID_ARGUMENT", "max_file_size must be positive."
+                                )
+                            indexer.max_file_size = configured_limit
                         result = indexer.full_sync().as_dict()
                         self.set_index_status(db.status())
                         self.set_state("ready" if result["status"] == "complete" else "degraded")
@@ -469,15 +485,26 @@ class DuckVaultDaemon:
         try:
             self.server.serve_forever(poll_interval=0.2)
         finally:
-            self.worker.stop()
-            self.server.server_close()
+            shutdown_error: DuckVaultError | None = None
             try:
-                self.layout.endpoint_path.unlink()
-            except FileNotFoundError:
-                pass
+                self.worker.stop()
+            except DuckVaultError as exc:
+                shutdown_error = exc
+            self.server.server_close()
+            if shutdown_error is None:
+                try:
+                    self.layout.endpoint_path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                failed_endpoint = {**endpoint, "state": "shutdown_failed"}
+                failed_endpoint["shutdown_error"] = shutdown_error.as_dict()
+                _atomic_json(self.layout.endpoint_path, failed_endpoint)
             owner_lock.release()
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+            if shutdown_error is not None:
+                raise shutdown_error
 
 
 def ensure_daemon(
@@ -590,7 +617,7 @@ def ensure_daemon(
         while time.monotonic() < deadline:
             try:
                 health = checked_health()
-                if health.get("state") == "starting":
+                if health.get("state") in {"starting", "preparing"}:
                     time.sleep(0.05)
                     continue
                 return client

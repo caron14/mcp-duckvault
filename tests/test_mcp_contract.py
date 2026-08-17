@@ -59,6 +59,23 @@ def test_search_contract_deduplicates_documents_and_bounds_snippets(tmp_path, da
     assert result["items"][0]["reason"] == "best_vector_chunk"
 
 
+def test_empty_search_result_uses_the_same_schema(tmp_path, database_factory):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    server = create_mcp_server(str(vault), database_factory(), TrackingModel())
+
+    result = call(server, "search_notes", {"query": "nothing"})
+
+    assert result == {
+        "schema_version": "1.0",
+        "tool": "search_notes",
+        "count": 0,
+        "items": [],
+        "query": "nothing",
+        "tag": None,
+    }
+
+
 @pytest.mark.parametrize(
     ("tool", "arguments"),
     [

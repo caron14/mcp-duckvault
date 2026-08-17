@@ -16,11 +16,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .db_manager import DatabaseManager
+from .errors import DuckVaultError
 from .graph_extractor import GraphExtractor
 from .graph_repository import GraphRepository
-from .sync_status import IndexResult, IndexStatus, SyncSummary, utc_now
+from .sync_status import IndexResult, IndexStatus, SyncPlan, SyncSummary, utc_now
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_MARKDOWN_BYTES = 10 * 1024 * 1024
 
 
 def _json_default(obj):
@@ -209,7 +211,12 @@ class VaultIndexer:
     """
 
     def __init__(
-        self, vault_path: str, db_manager: DatabaseManager, model: Optional[EmbeddingModel] = None
+        self,
+        vault_path: str,
+        db_manager: DatabaseManager,
+        model: Optional[EmbeddingModel] = None,
+        *,
+        max_file_size: int | None = None,
     ):
         """Initializes the VaultIndexer.
 
@@ -226,6 +233,14 @@ class VaultIndexer:
         self.graph_extractor = GraphExtractor(self.vault_path)
         self.graph_repository = GraphRepository(db_manager)
         self.exclude_patterns = self._load_exclude_patterns()
+        configured_limit = os.environ.get("DUCKVAULT_MAX_MARKDOWN_BYTES")
+        self.max_file_size = (
+            max_file_size
+            if max_file_size is not None
+            else int(configured_limit or DEFAULT_MAX_MARKDOWN_BYTES)
+        )
+        if self.max_file_size < 1:
+            raise ValueError("max_file_size must be positive")
 
     def _load_exclude_patterns(self) -> List[str]:
         """Loads exclusion patterns from .vaultignore or uses defaults.
@@ -249,7 +264,8 @@ class VaultIndexer:
 
         return list(set(patterns))
 
-    def _is_excluded(self, rel_path: str) -> bool:
+    def exclusion_reason(self, rel_path: str) -> str | None:
+        """Return the matching ignore rule for a relative path, if any."""
         """Checks if a given relative path matches any exclusion patterns.
 
         Args:
@@ -270,13 +286,110 @@ class VaultIndexer:
             if fnmatch.fnmatch(norm_path, clean_pattern) or fnmatch.fnmatch(
                 norm_path, f"{clean_pattern}/*"
             ):
-                return True
+                return f"pattern:{pattern}"
 
             # 2. Match against each part of the path (for simple patterns like ".obsidian")
             for part in path_parts:
                 if fnmatch.fnmatch(part, clean_pattern):
-                    return True
-        return False
+                    return f"pattern:{pattern}"
+        return None
+
+    def _is_excluded(self, rel_path: str) -> bool:
+        return self.exclusion_reason(rel_path) is not None
+
+    def _path_safety_reason(self, file_path: str) -> str | None:
+        path = os.path.abspath(file_path)
+        try:
+            common = os.path.commonpath([self.vault_path, path])
+        except ValueError:
+            return "outside_vault"
+        if common != self.vault_path:
+            return "outside_vault"
+        if os.path.islink(path):
+            return "symlink_not_allowed"
+        try:
+            resolved = os.path.realpath(path)
+            if os.path.commonpath([self.vault_path, resolved]) != self.vault_path:
+                return "outside_vault"
+        except ValueError:
+            return "outside_vault"
+        return None
+
+    def _discover_files(self) -> tuple[list[tuple[str, str]], dict[str, str]]:
+        current_files: list[tuple[str, str]] = []
+        excluded: dict[str, str] = {}
+        for root, dirs, files in os.walk(self.vault_path, followlinks=False):
+            retained_dirs = []
+            for directory in dirs:
+                full_directory = os.path.join(root, directory)
+                relative_directory = os.path.relpath(full_directory, self.vault_path).replace(
+                    os.sep, "/"
+                )
+                reason = self.exclusion_reason(relative_directory)
+                if os.path.islink(full_directory):
+                    reason = "symlink_not_allowed"
+                if reason:
+                    excluded[relative_directory] = reason
+                else:
+                    retained_dirs.append(directory)
+            dirs[:] = retained_dirs
+            for filename in files:
+                if not filename.endswith(".md"):
+                    continue
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, self.vault_path).replace(os.sep, "/")
+                reason = self.exclusion_reason(rel_path) or self._path_safety_reason(full_path)
+                if reason:
+                    excluded[rel_path] = reason
+                else:
+                    current_files.append((full_path, rel_path))
+        return current_files, excluded
+
+    def plan_sync(self) -> SyncPlan:
+        """Calculate a synchronization plan without modifying the database."""
+        plan = SyncPlan()
+        current_files, exclusions = self._discover_files()
+        plan.excluded = len(exclusions)
+        plan.paths["excluded"] = sorted(exclusions)
+        plan.reasons.update(exclusions)
+        existing: dict[str, tuple[str, str | None]] = {}
+        if self.db.conn is not None and self.db._table_exists("documents"):
+            existing = {
+                row[0]: (row[1], row[2])
+                for row in self.db.conn.execute(
+                    "SELECT path, md5, index_signature FROM documents"
+                ).fetchall()
+            }
+        signature = self.db._config("index_signature") if self.db.conn is not None else None
+        current_paths: set[str] = set()
+        for full_path, rel_path in current_files:
+            current_paths.add(rel_path)
+            plan.scanned += 1
+            try:
+                size = os.path.getsize(full_path)
+                plan.total_bytes += size
+                if size > self.max_file_size:
+                    plan.failed += 1
+                    plan.paths["failed"].append(rel_path)
+                    plan.reasons[rel_path] = f"file_too_large:{size}>{self.max_file_size}"
+                    continue
+                digest = self.get_file_hash(full_path)
+            except OSError as exc:
+                plan.failed += 1
+                plan.paths["failed"].append(rel_path)
+                plan.reasons[rel_path] = f"unreadable:{type(exc).__name__}"
+                continue
+            previous = existing.get(rel_path)
+            if previous and previous == (digest, signature):
+                plan.skipped += 1
+                plan.paths["skipped"].append(rel_path)
+            else:
+                plan.indexed += 1
+                plan.paths["indexed"].append(rel_path)
+        deleted = sorted(set(existing) - current_paths)
+        plan.deleted = len(deleted)
+        plan.paths["deleted"] = deleted
+        return plan
 
     def get_file_hash(self, file_path: str) -> str:
         """Calculates the MD5 hash of a file's content.
@@ -310,10 +423,26 @@ class VaultIndexer:
         if self._is_excluded(rel_path):
             return IndexResult(rel_path, IndexStatus.SKIPPED)
 
+        safety_reason = self._path_safety_reason(file_path)
+        if safety_reason:
+            return IndexResult(
+                rel_path,
+                IndexStatus.FAILED,
+                error_code="UNSAFE_PATH",
+                error_type=safety_reason,
+                occurred_at=utc_now(),
+            )
+
         if show_log:
             logger.info(f"Indexing file: {rel_path}")
 
         try:
+            size = os.path.getsize(file_path)
+            if size > self.max_file_size:
+                raise DuckVaultError(
+                    "FILE_TOO_LARGE",
+                    f"Markdown file exceeds {self.max_file_size} bytes.",
+                )
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
 
@@ -404,7 +533,7 @@ class VaultIndexer:
             result = IndexResult(
                 rel_path,
                 IndexStatus.FAILED,
-                error_code="INDEX_FILE_FAILED",
+                error_code=exc.code if isinstance(exc, DuckVaultError) else "INDEX_FILE_FAILED",
                 error_type=type(exc).__name__,
                 occurred_at=utc_now(),
             )
@@ -462,28 +591,8 @@ class VaultIndexer:
         db_files = set(
             row[0] for row in self.db.conn.execute("SELECT path FROM documents").fetchall()
         )
-        current_files = []
-
-        # First pass: collect all files to index
-        for root, dirs, files in os.walk(self.vault_path):
-            # filter dirs in-place to avoid traversing excluded directories
-            retained_dirs = []
-            for directory in dirs:
-                relative_directory = os.path.relpath(os.path.join(root, directory), self.vault_path)
-                if self._is_excluded(relative_directory):
-                    summary.excluded += 1
-                else:
-                    retained_dirs.append(directory)
-            dirs[:] = retained_dirs
-
-            for file in files:
-                if file.endswith(".md"):
-                    full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, self.vault_path).replace(os.sep, "/")
-                    if not self._is_excluded(rel_path):
-                        current_files.append((full_path, rel_path))
-                    else:
-                        summary.excluded += 1
+        current_files, exclusions = self._discover_files()
+        summary.excluded = len(exclusions)
 
         summary.scanned = len(current_files)
 

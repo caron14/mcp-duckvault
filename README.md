@@ -57,10 +57,13 @@ longer accepted.
 duckvault init VAULT_PATH [--non-interactive] [--json]
 duckvault serve VAULT_PATH
 duckvault sync VAULT_PATH [--json]
+duckvault sync VAULT_PATH --dry-run [--json]
 duckvault status VAULT_PATH [--json]
 duckvault doctor VAULT_PATH [--json]
 duckvault daemon start|stop|restart|status VAULT_PATH
 duckvault migrate-legacy VAULT_PATH [--legacy-db PATH]
+duckvault reindex VAULT_PATH [--json]
+duckvault explain-ignore VAULT_PATH PATH [--json]
 duckvault visualize VAULT_PATH [--output FILE]
 duckvault --version
 ```
@@ -123,6 +126,19 @@ and rebuilds a new Vault-specific index with the current parser, graph extractor
 and embedding configuration. Do not delete the old DB until the new status and
 search results have been verified.
 
+Versioned schema migrations create a checkpointed backup in `backups/` before
+running in a transaction. If the parser, model, or embedding dimension changes,
+rebuild the index while the daemon is stopped:
+
+```bash
+duckvault daemon stop /absolute/path/to/vault
+duckvault reindex /absolute/path/to/vault --json
+```
+
+The replacement is built in a separate database and installed only after a
+complete sync. A failed rebuild leaves the original database and backup intact;
+`status` and `doctor` report the recovery command.
+
 ## Shared daemon and recovery
 
 `duckvault serve` is a small stdio MCP proxy. It connects to an authenticated
@@ -151,7 +167,7 @@ released by the OS and the next proxy replaces stale endpoint metadata.
 | Tool | Description |
 | --- | --- |
 | `search_notes(query, tag=None, limit=5)` | Vector similarity search |
-| `list_recent_notes(days=7)` | Recently indexed notes |
+| `list_recent_notes(days=7, limit=20)` | Notes recently modified on disk |
 | `find_related_notes(path, depth=1, limit=10)` | Related graph documents |
 | `list_graph_neighbors(path, depth=1, limit=20)` | Neighboring graph nodes |
 | `hybrid_search_notes(query, tag=None, limit=5, graph_depth=1)` | Vector plus graph retrieval |
@@ -163,11 +179,29 @@ Search results include `obsidian://open` links. Markdown frontmatter, H1–H3
 headings, Markdown/Wiki links, tags, folders, resources, citations, and OKF
 concept metadata are represented in the local graph.
 
+All MCP tools return versioned structured data. Retrieval responses contain
+`schema_version`, `tool`, `count`, and `items`; errors expose a stable `code`,
+`message`, and `retryable` flag. Limits are bounded to 100 results, graph depth
+to 5, and snippets to 2,000 characters.
+
 ## Exclusions and visualization
 
 `.obsidian` and `.trash` are excluded by default. Add patterns to
 `VAULT_PATH/.vaultignore`, one per line. Current matching supports simple glob
 patterns but is not fully gitignore-compatible.
+
+Preview a sync without loading the model or changing the database, and inspect
+why a path is excluded:
+
+```bash
+duckvault sync /absolute/path/to/vault --dry-run --json
+duckvault explain-ignore /absolute/path/to/vault private/note.md --json
+```
+
+Markdown files larger than 10 MiB fail safely without replacing their previous
+index entry. Configure the limit with `--max-file-size BYTES` or
+`DUCKVAULT_MAX_MARKDOWN_BYTES`. File and directory symlinks are not followed;
+Vault-external targets are never indexed.
 
 Stop the daemon before reading the DB for a graph export:
 

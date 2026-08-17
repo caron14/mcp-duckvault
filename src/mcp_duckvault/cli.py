@@ -63,6 +63,7 @@ def _initialize_vault(
     vault_path: str,
     *,
     custom_db_path: str | None = None,
+    max_file_size: int | None = None,
 ) -> dict[str, object]:
     layout = VaultLayout.for_vault(vault_path, create=True)
     selected_db = _db_path(layout, custom_db_path)
@@ -81,7 +82,10 @@ def _initialize_vault(
     try:
         db.initialize_schema(offline_model.dimension, model_id=offline_model.model_name)
         summary = VaultIndexer(
-            str(layout.identity.normalized_path), db, model=offline_model
+            str(layout.identity.normalized_path),
+            db,
+            model=offline_model,
+            max_file_size=max_file_size,
         ).full_sync()
         # A query embedding plus a DB read proves the offline search path is operational,
         # including for an empty Vault.
@@ -106,7 +110,7 @@ def _initialize_vault(
         layout.generated_mcp_config_path.chmod(0o600)
     except OSError:
         pass
-    return {
+    result = {
         "status": summary.status,
         "vault_id": layout.identity.vault_id,
         "vault_path": str(layout.identity.normalized_path),
@@ -116,6 +120,18 @@ def _initialize_vault(
         "sync": summary.as_dict(),
         "offline_ready": True,
     }
+    if summary.status != "complete":
+        result["retry_command"] = f"duckvault sync {layout.identity.normalized_path} --json"
+    return result
+
+
+def _preflight_plan(vault_path: str, *, max_file_size: int | None = None) -> dict[str, object]:
+    indexer = VaultIndexer(
+        vault_path,
+        DatabaseManager(":memory:"),
+        max_file_size=max_file_size,
+    )
+    return indexer.plan_sync().as_dict()
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -131,13 +147,28 @@ def main(verbose: bool) -> None:
 @click.option("--db-path", type=click.Path(dir_okay=False), help="Advanced custom DB path.")
 @click.option("--non-interactive", is_flag=True, help="Fail instead of prompting for decisions.")
 @click.option("--json", "json_output", is_flag=True, help="Emit one JSON result on stdout.")
+@click.option(
+    "--max-file-size",
+    type=click.IntRange(min=1),
+    help="Maximum Markdown file size in bytes (default: 10 MiB).",
+)
 def init_command(
-    vault_path: Path, db_path: str | None, non_interactive: bool, json_output: bool
+    vault_path: Path,
+    db_path: str | None,
+    non_interactive: bool,
+    json_output: bool,
+    max_file_size: int | None,
 ) -> None:
     """Prepare VSS/model, create the DB, sync, and generate MCP configuration."""
     del non_interactive  # Initialization is deterministic; destructive choices are separate commands.
     try:
-        result = _initialize_vault(str(vault_path), custom_db_path=db_path)
+        preflight = _preflight_plan(str(vault_path), max_file_size=max_file_size)
+        if not json_output:
+            _emit({"preflight": preflight}, False)
+        result = _initialize_vault(
+            str(vault_path), custom_db_path=db_path, max_file_size=max_file_size
+        )
+        result["preflight"] = preflight
         _emit(result, json_output)
         if result["status"] == "partial":
             raise click.exceptions.Exit(2)
@@ -166,11 +197,41 @@ def serve_command(vault_path: Path, db_path: str | None) -> None:
 @click.argument("vault_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--db-path", type=click.Path(dir_okay=False), help="Advanced custom DB path.")
 @click.option("--json", "json_output", is_flag=True)
-def sync_command(vault_path: Path, db_path: str | None, json_output: bool) -> None:
+@click.option("--dry-run", is_flag=True, help="Preview changes without updating the database.")
+@click.option("--max-file-size", type=click.IntRange(min=1), help="Maximum Markdown bytes.")
+def sync_command(
+    vault_path: Path,
+    db_path: str | None,
+    json_output: bool,
+    dry_run: bool,
+    max_file_size: int | None,
+) -> None:
     """Synchronize a Vault through its single-writer daemon."""
     try:
         layout = VaultLayout.for_vault(vault_path)
-        result = ensure_daemon(layout, db_path=db_path).call("sync", request_timeout=3600.0)
+        selected_db = _db_path(layout, db_path)
+        if dry_run:
+            if not Path(selected_db).exists():
+                raise DuckVaultError("NOT_INITIALIZED", "Vault has not been initialized.")
+            db = DatabaseManager(selected_db, identity=layout.identity, read_only=True)
+            try:
+                db.connect(load_vss=False)
+                result = (
+                    VaultIndexer(
+                        str(layout.identity.normalized_path),
+                        db,
+                        max_file_size=max_file_size,
+                    )
+                    .plan_sync()
+                    .as_dict()
+                )
+            finally:
+                db.close()
+        else:
+            params = {"max_file_size": max_file_size} if max_file_size is not None else {}
+            result = ensure_daemon(layout, db_path=db_path).call(
+                "sync", params, request_timeout=3600.0
+            )
         _emit(result, json_output)
         if result["status"] == "partial":
             raise click.exceptions.Exit(2)
@@ -178,6 +239,34 @@ def sync_command(vault_path: Path, db_path: str | None, json_output: bool) -> No
             raise click.exceptions.Exit(1)
     except click.exceptions.Exit:
         raise
+    except Exception as exc:
+        _fail(exc, json_output)
+
+
+@main.command("explain-ignore")
+@click.argument("vault_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("path", type=click.Path(path_type=Path))
+@click.option("--json", "json_output", is_flag=True)
+def explain_ignore_command(vault_path: Path, path: Path, json_output: bool) -> None:
+    """Explain whether a path is ignored or rejected by scan safety rules."""
+    try:
+        layout = VaultLayout.for_vault(vault_path)
+        indexer = VaultIndexer(str(layout.identity.normalized_path), DatabaseManager(":memory:"))
+        candidate = path if path.is_absolute() else layout.identity.normalized_path / path
+        rel_path = os.path.relpath(candidate, layout.identity.normalized_path).replace(os.sep, "/")
+        reason = indexer.exclusion_reason(rel_path) or indexer._path_safety_reason(str(candidate))
+        if reason is None and candidate.exists() and candidate.is_file():
+            size = candidate.stat().st_size
+            if size > indexer.max_file_size:
+                reason = f"file_too_large:{size}>{indexer.max_file_size}"
+        _emit(
+            {
+                "path": rel_path,
+                "excluded": reason is not None,
+                "reason": reason,
+            },
+            json_output,
+        )
     except Exception as exc:
         _fail(exc, json_output)
 
