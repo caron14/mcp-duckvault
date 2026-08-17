@@ -2,6 +2,10 @@
 
 import asyncio
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+
+from mcp_duckvault.errors import DuckVaultError
 from mcp_duckvault.mcp_proxy import create_proxy_server
 
 
@@ -35,3 +39,23 @@ def test_proxy_exposes_existing_tools_and_structured_index_status():
         "failures": [],
         "complete": True,
     }
+
+
+def test_proxy_preserves_structured_daemon_error_fields():
+    class FailingClient:
+        def call(self, method, params=None):
+            del method, params
+            raise DuckVaultError("INVALID_ARGUMENT", "bad input", retryable=False)
+
+    server = create_proxy_server(FailingClient())
+    with pytest.raises(ToolError) as caught:
+        asyncio.run(
+            server._tool_manager.call_tool(
+                "search_notes", {"query": "test"}, convert_result=False
+            )
+        )
+
+    message = str(caught.value)
+    assert '"code":"INVALID_ARGUMENT"' in message
+    assert '"message":"bad input"' in message
+    assert '"retryable":false' in message

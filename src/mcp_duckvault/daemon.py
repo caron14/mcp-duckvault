@@ -294,11 +294,16 @@ class DaemonWorker:
                         self.set_index_status(db.status())
                         result = {"status": "deleted"}
                     elif operation.startswith("tool:"):
-                        result = asyncio.run(
-                            mcp._tool_manager.call_tool(
-                                operation.removeprefix("tool:"), params, convert_result=False
+                        try:
+                            result = asyncio.run(
+                                mcp._tool_manager.call_tool(
+                                    operation.removeprefix("tool:"), params, convert_result=False
+                                )
                             )
-                        )
+                        except Exception as exc:
+                            if isinstance(exc.__cause__, DuckVaultError):
+                                raise exc.__cause__
+                            raise
                     else:
                         raise DuckVaultError("UNKNOWN_OPERATION", f"Unknown operation: {operation}")
                     if future:
