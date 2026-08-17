@@ -13,6 +13,8 @@ from mcp_duckvault.graph_visualizer import (
     render_graph_html,
     write_graph_visualization,
 )
+from mcp_duckvault.indexer import VaultIndexer
+from mcp_duckvault.vault_identity import VaultIdentity
 
 
 def _visualization_repository(tmp_path):
@@ -109,7 +111,7 @@ def test_write_graph_visualization_creates_html_and_json(tmp_path):
     assert graph["stats"]["documents"] == 3
 
 
-def test_visualize_cli_syncs_writes_artifacts_and_exits(tmp_path, monkeypatch):
+def test_visualize_cli_writes_artifacts_from_initialized_db(tmp_path, monkeypatch):
     class FakeEmbeddingModel:
         dimension = 4
 
@@ -122,15 +124,20 @@ def test_visualize_cli_syncs_writes_artifacts_and_exits(tmp_path, monkeypatch):
         "---\ntype: concept\ntitle: Note\n---\n# Note\nBody", encoding="utf-8"
     )
     html_path = tmp_path / "artifacts" / "graph.html"
-    monkeypatch.setattr(cli, "EmbeddingModel", FakeEmbeddingModel)
+    monkeypatch.setenv("DUCKVAULT_HOME", str(tmp_path / "home"))
+    db_path = tmp_path / "vault.db"
+    db = DatabaseManager(str(db_path), identity=VaultIdentity.from_path(vault))
+    db.initialize_schema(embedding_dim=4)
+    VaultIndexer(str(vault), db, model=FakeEmbeddingModel()).full_sync()
+    db.close()
 
     result = CliRunner().invoke(
         cli.main,
         [
+            "visualize",
             str(vault),
             "--db-path",
-            str(tmp_path / "vault.db"),
-            "--visualize",
+            str(db_path),
             "--output",
             str(html_path),
         ],

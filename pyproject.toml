@@ -1,6 +1,6 @@
 [project]
 name = "mcp-duckvault"
-version = "0.3.0"
+version = "0.4.0"
 description = "DuckVault-MCP: local vector and visual graph RAG for Markdown and OKF"
 readme = "README.md"
 license = "MIT"
@@ -25,7 +25,8 @@ classifiers = [
 dependencies = [
     "click>=8.0.0",
     "duckdb>=1.5.1",
-    "mcp[cli]>=1.27.0",
+    "filelock>=3.18.0",
+    "mcp[cli]>=1.27.0,<2",
     "pandas>=3.0.2",
     "pyyaml>=6.0.3",
     "sentence-transformers>=5.4.0",

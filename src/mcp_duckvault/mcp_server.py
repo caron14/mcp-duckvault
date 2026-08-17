@@ -58,7 +58,11 @@ def _vector_search(
 
 
 def create_mcp_server(
-    vault_path: str, db_manager: DatabaseManager, model: EmbeddingModel
+    vault_path: str,
+    db_manager: DatabaseManager,
+    model: EmbeddingModel,
+    *,
+    manage_connection: bool | None = None,
 ) -> FastMCP:
     """Creates and configures the FastMCP server instance for DuckVault.
 
@@ -76,7 +80,9 @@ def create_mcp_server(
     mcp = FastMCP("DuckVault-MCP")
 
     vault_name = os.path.basename(os.path.abspath(vault_path))
-    owns_connection = db_manager.db_path != ":memory:"
+    owns_connection = (
+        db_manager.db_path != ":memory:" if manage_connection is None else manage_connection
+    )
     db = DatabaseManager(db_manager.db_path) if owns_connection else db_manager
 
     def connect() -> None:
@@ -105,7 +111,7 @@ def create_mcp_server(
             str: A formatted Markdown string containing the search results,
                 including Obsidian URIs and content snippets.
         """
-        logger.info(f"Searching notes for query: '{query}', tag: {tag}")
+        logger.info("Searching notes (tag filter: %s)", bool(tag))
 
         connect()
         try:
@@ -129,8 +135,8 @@ def create_mcp_server(
             return "\n---\n".join(formatted_results)
 
         except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return f"Error during search: {str(e)}"
+            logger.error("Search failed (%s)", type(e).__name__)
+            return f"Error during search: {type(e).__name__}"
         finally:
             close()
 
@@ -174,8 +180,8 @@ def create_mcp_server(
             return "\n".join(output)
 
         except Exception as e:
-            logger.error(f"Failed to list recent notes: {e}")
-            return f"Error: {str(e)}"
+            logger.error("Failed to list recent notes (%s)", type(e).__name__)
+            return f"Error: {type(e).__name__}"
         finally:
             close()
 
@@ -213,8 +219,8 @@ def create_mcp_server(
                 )
             return "\n\n".join(output)
         except Exception as e:
-            logger.error(f"Related-note search failed: {e}")
-            return f"Error during graph search: {str(e)}"
+            logger.error("Related-note search failed (%s)", type(e).__name__)
+            return f"Error during graph search: {type(e).__name__}"
         finally:
             close()
 
@@ -237,8 +243,8 @@ def create_mcp_server(
                 )
             return "\n".join(output)
         except Exception as e:
-            logger.error(f"Neighbor listing failed: {e}")
-            return f"Error during graph search: {str(e)}"
+            logger.error("Neighbor listing failed (%s)", type(e).__name__)
+            return f"Error during graph search: {type(e).__name__}"
         finally:
             close()
 
@@ -327,8 +333,8 @@ def create_mcp_server(
                 )
             return "\n---\n".join(output)
         except Exception as e:
-            logger.error(f"Hybrid search failed: {e}")
-            return f"Error during hybrid search: {str(e)}"
+            logger.error("Hybrid search failed (%s)", type(e).__name__)
+            return f"Error during hybrid search: {type(e).__name__}"
         finally:
             close()
 
@@ -356,8 +362,8 @@ def create_mcp_server(
                 )
             return "\n\n".join(output)
         except Exception as e:
-            logger.error(f"OKF concept search failed: {e}")
-            return f"Error during OKF concept search: {str(e)}"
+            logger.error("OKF concept search failed (%s)", type(e).__name__)
+            return f"Error during OKF concept search: {type(e).__name__}"
         finally:
             close()
 
@@ -387,8 +393,21 @@ def create_mcp_server(
                 f"- Link: [{path}]({_obsidian_uri(vault_name, path)})"
             )
         except Exception as e:
-            logger.error(f"OKF concept explanation failed: {e}")
-            return f"Error during OKF concept explanation: {str(e)}"
+            logger.error("OKF concept explanation failed (%s)", type(e).__name__)
+            return f"Error during OKF concept explanation: {type(e).__name__}"
+        finally:
+            close()
+
+    @mcp.tool()
+    async def get_index_status(
+        include_failures: bool = False, failure_limit: int = 100
+    ) -> dict[str, object]:
+        """Return index completeness and the most recent synchronization result."""
+        connect()
+        try:
+            result = db.status(failure_limit=failure_limit if include_failures else 0)
+            result["complete"] = result["index_state"] == "ready"
+            return result
         finally:
             close()
 
