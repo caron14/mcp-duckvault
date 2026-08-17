@@ -39,60 +39,68 @@ def test_three_clients_share_one_daemon(tmp_path, monkeypatch, database_factory)
     db.close()
 
     daemon = DuckVaultDaemon(layout, load_vss=False)
-    thread = threading.Thread(target=daemon.run)
+    # Keep a failed assertion from leaving a non-daemon test thread behind and
+    # blocking the pytest interpreter at shutdown.
+    thread = threading.Thread(target=daemon.run, daemon=True)
     thread.start()
-    client = DaemonClient(layout, timeout=2)
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            if client.health()["state"] == "ready":
+    try:
+        client = DaemonClient(layout, timeout=2)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                if client.health()["state"] == "ready":
+                    break
+            except Exception:
+                pass
+            time.sleep(0.05)
+        else:
+            raise AssertionError("daemon did not become ready")
+
+        wrong_db = tmp_path / "wrong.db"
+        wrong_db.touch()
+        with pytest.raises(DuckVaultError, match="Running daemon uses"):
+            ensure_daemon(layout, db_path=str(wrong_db))
+
+        second = DuckVaultDaemon(layout)
+        with pytest.raises(DuckVaultError, match="already owns"):
+            second.run()
+        second.server.server_close()
+
+        clients = [DaemonClient(layout, timeout=2) for _ in range(3)]
+        original_submit = daemon.worker.submit
+        daemon.worker.submit = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("status must not wait on the DB worker")
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            statuses = list(executor.map(lambda item: item.call("status"), clients))
+        daemon.worker.submit = original_submit
+
+        assert {status["vault_id"] for status in statuses} == {layout.identity.vault_id}
+        assert {status["state"] for status in statuses} == {"ready"}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            reads = [
+                executor.submit(item.call, "tool:list_recent_notes", {"days": 7})
+                for item in clients
+            ]
+            note.unlink()
+            assert all(future.result() for future in reads)
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if client.call("tool:list_recent_notes", {"days": 7})["count"] == 0:
                 break
-        except Exception:
-            pass
-        time.sleep(0.05)
-    else:
-        raise AssertionError("daemon did not become ready")
-
-    wrong_db = tmp_path / "wrong.db"
-    wrong_db.touch()
-    with pytest.raises(DuckVaultError, match="Running daemon uses"):
-        ensure_daemon(layout, db_path=str(wrong_db))
-
-    second = DuckVaultDaemon(layout)
-    with pytest.raises(DuckVaultError, match="already owns"):
-        second.run()
-    second.server.server_close()
-
-    clients = [DaemonClient(layout, timeout=2) for _ in range(3)]
-    original_submit = daemon.worker.submit
-    daemon.worker.submit = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("status must not wait on the DB worker")
-    )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        statuses = list(executor.map(lambda item: item.call("status"), clients))
-    daemon.worker.submit = original_submit
-
-    assert {status["vault_id"] for status in statuses} == {layout.identity.vault_id}
-    assert {status["state"] for status in statuses} == {"ready"}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        reads = [
-            executor.submit(item.call, "tool:list_recent_notes", {"days": 7}) for item in clients
-        ]
-        note.unlink()
-        assert all(future.result() for future in reads)
-
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if client.call("tool:list_recent_notes", {"days": 7})["count"] == 0:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("watcher update was not indexed")
-    client.call("shutdown")
-    thread.join(timeout=10)
-    assert not thread.is_alive()
-    assert not layout.endpoint_path.exists()
+            time.sleep(0.05)
+        else:
+            raise AssertionError("watcher update was not indexed")
+        client.call("shutdown")
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert not layout.endpoint_path.exists()
+    finally:
+        daemon.request_shutdown()
+        thread.join(timeout=20)
+        daemon.server.server_close()
 
 
 def test_worker_shutdown_timeout_is_not_reported_as_success(tmp_path, monkeypatch):

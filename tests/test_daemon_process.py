@@ -51,8 +51,30 @@ def _start_process(context, vault, home):
         target=_run_daemon_process,
         args=(str(vault), str(home), outcomes),
     )
-    process.start()
+    try:
+        process.start()
+    except Exception:
+        outcomes.close()
+        outcomes.join_thread()
+        raise
     return process, outcomes
+
+
+def _cleanup_processes(resources):
+    """Stop spawned daemons and release multiprocessing IPC resources."""
+    for process, outcomes in reversed(resources):
+        try:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+            if not process.is_alive():
+                process.close()
+        finally:
+            outcomes.close()
+            outcomes.join_thread()
 
 
 def _wait_ready(layout, timeout=25):
@@ -96,6 +118,7 @@ def test_process_owner_three_proxies_watcher_and_sigterm_drain(
     tmp_path, monkeypatch, database_factory
 ):
     context = multiprocessing.get_context("spawn")
+    resources = []
     home = tmp_path / "home"
     monkeypatch.setenv("DUCKVAULT_HOME", str(home))
     monkeypatch.setenv("DUCKVAULT_TEST_MODEL_DELAY", "0.15")
@@ -106,73 +129,78 @@ def test_process_owner_three_proxies_watcher_and_sigterm_drain(
     layout = VaultLayout.for_vault(vault, create=True)
     _initialize_process_database(vault, layout, database_factory)
 
-    owner, owner_outcomes = _start_process(context, vault, home)
-    client = _wait_ready(layout)
-    contender, contender_outcomes = _start_process(context, vault, home)
-    contender.join(timeout=5)
-    assert not contender.is_alive()
-    assert contender_outcomes.get(timeout=2) == "DAEMON_ALREADY_RUNNING"
+    try:
+        owner, owner_outcomes = _start_process(context, vault, home)
+        resources.append((owner, owner_outcomes))
+        client = _wait_ready(layout)
+        contender, contender_outcomes = _start_process(context, vault, home)
+        resources.append((contender, contender_outcomes))
+        contender.join(timeout=5)
+        assert not contender.is_alive()
+        assert contender_outcomes.get(timeout=2) == "DAEMON_ALREADY_RUNNING"
 
-    proxies = [create_proxy_server(DaemonClient(layout, timeout=5)) for _ in range(3)]
+        proxies = [create_proxy_server(DaemonClient(layout, timeout=5)) for _ in range(3)]
 
-    def recent(proxy):
-        async def invoke():
-            return await proxy._tool_manager.call_tool(
-                "list_recent_notes", {"days": 7}, convert_result=False
-            )
+        def recent(proxy):
+            async def invoke():
+                return await proxy._tool_manager.call_tool(
+                    "list_recent_notes", {"days": 7}, convert_result=False
+                )
 
-        return asyncio.run(invoke())
+            return asyncio.run(invoke())
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        results = list(executor.map(recent, proxies))
-    assert all(result["items"][0]["path"] == "note.md" for result in results)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(recent, proxies))
+        assert all(result["items"][0]["path"] == "note.md" for result in results)
 
-    created = vault / "created.md"
-    moved = vault / "moved.md"
-    created.write_text("# Created", encoding="utf-8")
-    _wait_recent_paths(client, {"created.md", "note.md"})
-    created.rename(moved)
-    _wait_recent_paths(client, {"moved.md", "note.md"}, {"created.md"})
-    moved.unlink()
-    _wait_recent_paths(client, {"note.md"}, {"created.md", "moved.md"})
+        created = vault / "created.md"
+        moved = vault / "moved.md"
+        created.write_text("# Created", encoding="utf-8")
+        _wait_recent_paths(client, {"created.md", "note.md"})
+        created.rename(moved)
+        _wait_recent_paths(client, {"moved.md", "note.md"}, {"created.md"})
+        moved.unlink()
+        _wait_recent_paths(client, {"note.md"}, {"created.md", "moved.md"})
 
-    note.write_text("# Updated during concurrent work", encoding="utf-8")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        sync = executor.submit(client.call, "sync", {}, request_timeout=10)
-        searches = [
-            executor.submit(
-                client.call, "tool:search_notes", {"query": "updated"}, request_timeout=10
-            )
-            for _ in range(3)
-        ]
-        assert sync.result(timeout=10)["status"] == "complete"
-        assert all(search.result(timeout=10)["count"] >= 1 for search in searches)
+        note.write_text("# Updated during concurrent work", encoding="utf-8")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            sync = executor.submit(client.call, "sync", {}, request_timeout=10)
+            searches = [
+                executor.submit(
+                    client.call, "tool:search_notes", {"query": "updated"}, request_timeout=10
+                )
+                for _ in range(3)
+            ]
+            assert sync.result(timeout=10)["status"] == "complete"
+            assert all(search.result(timeout=10)["count"] >= 1 for search in searches)
 
-    note.write_text("# Updated before graceful stop", encoding="utf-8")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        sync_future = executor.submit(client.call, "sync", {}, request_timeout=10)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and client.health()["state"] != "syncing":
-            time.sleep(0.02)
-        os.kill(owner.pid, signal.SIGTERM)
-        assert sync_future.result(timeout=10)["status"] == "complete"
+        note.write_text("# Updated before graceful stop", encoding="utf-8")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            sync_future = executor.submit(client.call, "sync", {}, request_timeout=10)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and client.health()["state"] != "syncing":
+                time.sleep(0.02)
+            os.kill(owner.pid, signal.SIGTERM)
+            assert sync_future.result(timeout=10)["status"] == "complete"
 
-    owner.join(timeout=10)
-    assert not owner.is_alive()
-    assert owner_outcomes.get(timeout=2) == "stopped"
-    assert not layout.endpoint_path.exists()
+        owner.join(timeout=10)
+        assert not owner.is_alive()
+        assert owner_outcomes.get(timeout=2) == "stopped"
+        assert not layout.endpoint_path.exists()
 
-    from mcp_duckvault.db_manager import DatabaseManager
+        from mcp_duckvault.db_manager import DatabaseManager
 
-    recovered = DatabaseManager(str(layout.db_path), identity=layout.identity, read_only=True)
-    recovered.connect(load_vss=False)
-    assert (
-        "Updated before graceful stop"
-        in recovered.conn.execute(
-            "SELECT content FROM chunks WHERE document_path = 'note.md'"
-        ).fetchone()[0]
-    )
-    recovered.close()
+        recovered = DatabaseManager(str(layout.db_path), identity=layout.identity, read_only=True)
+        recovered.connect(load_vss=False)
+        assert (
+            "Updated before graceful stop"
+            in recovered.conn.execute(
+                "SELECT content FROM chunks WHERE document_path = 'note.md'"
+            ).fetchone()[0]
+        )
+        recovered.close()
+    finally:
+        _cleanup_processes(resources)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="SIGKILL is required")
@@ -180,6 +208,7 @@ def test_sigkill_stale_endpoint_recovers_without_database_loss(
     tmp_path, monkeypatch, database_factory
 ):
     context = multiprocessing.get_context("spawn")
+    resources = []
     home = tmp_path / "home"
     monkeypatch.setenv("DUCKVAULT_HOME", str(home))
     vault = tmp_path / "vault"
@@ -187,33 +216,38 @@ def test_sigkill_stale_endpoint_recovers_without_database_loss(
     (vault / "note.md").write_text("# Durable", encoding="utf-8")
     layout = VaultLayout.for_vault(vault, create=True)
     _initialize_process_database(vault, layout, database_factory)
-    owner, _ = _start_process(context, vault, home)
-    client = _wait_ready(layout)
-    pid = client.health()["pid"]
+    try:
+        owner, owner_outcomes = _start_process(context, vault, home)
+        resources.append((owner, owner_outcomes))
+        client = _wait_ready(layout)
+        pid = client.health()["pid"]
 
-    os.kill(pid, signal.SIGKILL)
-    owner.join(timeout=5)
-    assert not owner.is_alive()
-    assert layout.endpoint_path.exists()
-    assert layout.owner_lock_path.exists()
+        os.kill(pid, signal.SIGKILL)
+        owner.join(timeout=5)
+        assert not owner.is_alive()
+        assert layout.endpoint_path.exists()
+        assert layout.owner_lock_path.exists()
 
-    started = []
+        started = []
 
-    def launch_replacement(*_args, **_kwargs):
-        process, outcomes = _start_process(context, vault, home)
-        started.append((process, outcomes))
-        return process
+        def launch_replacement(*_args, **_kwargs):
+            process, outcomes = _start_process(context, vault, home)
+            resources.append((process, outcomes))
+            started.append((process, outcomes))
+            return process
 
-    import mcp_duckvault.daemon as daemon_module
+        import mcp_duckvault.daemon as daemon_module
 
-    monkeypatch.setattr(daemon_module.subprocess, "Popen", launch_replacement)
-    replacement_client = ensure_daemon(layout, timeout=5)
-    assert replacement_client.health()["pid"] != pid
-    result = replacement_client.call("tool:search_notes", {"query": "durable"})
-    assert result["items"][0]["path"] == "note.md"
+        monkeypatch.setattr(daemon_module.subprocess, "Popen", launch_replacement)
+        replacement_client = ensure_daemon(layout, timeout=5)
+        assert replacement_client.health()["pid"] != pid
+        result = replacement_client.call("tool:search_notes", {"query": "durable"})
+        assert result["items"][0]["path"] == "note.md"
 
-    replacement_client.call("shutdown")
-    replacement, outcomes = started[0]
-    replacement.join(timeout=10)
-    assert not replacement.is_alive()
-    assert outcomes.get(timeout=2) == "stopped"
+        replacement_client.call("shutdown")
+        replacement, outcomes = started[0]
+        replacement.join(timeout=10)
+        assert not replacement.is_alive()
+        assert outcomes.get(timeout=2) == "stopped"
+    finally:
+        _cleanup_processes(resources)
