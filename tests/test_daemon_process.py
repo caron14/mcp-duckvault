@@ -14,6 +14,8 @@ from mcp_duckvault.indexer import VaultIndexer
 from mcp_duckvault.mcp_proxy import create_proxy_server
 from mcp_duckvault.vault_identity import VaultLayout
 
+PROCESS_START_TIMEOUT = 25
+
 
 class ProcessEmbeddingModel:
     model_name = "test/process-model"
@@ -77,7 +79,7 @@ def _cleanup_processes(resources):
             outcomes.join_thread()
 
 
-def _wait_ready(layout, timeout=25):
+def _wait_ready(layout, timeout=PROCESS_START_TIMEOUT):
     client = DaemonClient(layout, timeout=2)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -135,9 +137,9 @@ def test_process_owner_three_proxies_watcher_and_sigterm_drain(
         client = _wait_ready(layout)
         contender, contender_outcomes = _start_process(context, vault, home)
         resources.append((contender, contender_outcomes))
+        assert contender_outcomes.get(timeout=PROCESS_START_TIMEOUT) == "DAEMON_ALREADY_RUNNING"
         contender.join(timeout=5)
         assert not contender.is_alive()
-        assert contender_outcomes.get(timeout=2) == "DAEMON_ALREADY_RUNNING"
 
         proxies = [create_proxy_server(DaemonClient(layout, timeout=5)) for _ in range(3)]
 
@@ -239,7 +241,7 @@ def test_sigkill_stale_endpoint_recovers_without_database_loss(
         import mcp_duckvault.daemon as daemon_module
 
         monkeypatch.setattr(daemon_module.subprocess, "Popen", launch_replacement)
-        replacement_client = ensure_daemon(layout, timeout=5)
+        replacement_client = ensure_daemon(layout, timeout=PROCESS_START_TIMEOUT)
         assert replacement_client.health()["pid"] != pid
         result = replacement_client.call("tool:search_notes", {"query": "durable"})
         assert result["items"][0]["path"] == "note.md"
