@@ -232,7 +232,7 @@ def test_failed_reindex_preserves_old_index_and_recovery_details(
     assert status["index_state"] == "reindex_failed"
     assert status["reindex"]["required"] is True
     assert status["reindex"]["backup"]
-    assert status["reindex"]["repair"] == f"duckvault reindex {vault}"
+    assert status["reindex"]["repair"] == (f"duckvault reindex {layout.identity.normalized_path}")
     preserved.close()
 
     retry = cli._reindex_vault(str(vault), model=FakeEmbeddingModel(dimension=8), load_vss=False)
