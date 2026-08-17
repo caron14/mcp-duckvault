@@ -204,9 +204,14 @@ class DaemonWorker:
             raise DuckVaultError(
                 "DAEMON_NOT_READY", "DuckVault daemon is preparing.", retryable=True
             )
-        if state == "reindex_required" and operation.startswith("tool:"):
+        if state in {"reindex_required", "reindex_failed"} and (
+            operation == "sync" or operation.startswith("tool:")
+        ):
             raise DuckVaultError(
-                "REINDEX_REQUIRED", "The Vault index must be rebuilt.", retryable=True
+                "REINDEX_REQUIRED",
+                f"The Vault index must be rebuilt with 'duckvault reindex "
+                f"{self.layout.identity.normalized_path}'.",
+                retryable=True,
             )
         if state == "failed":
             raise DuckVaultError("DAEMON_FAILED", "DuckVault daemon initialization failed.")
@@ -233,7 +238,7 @@ class DaemonWorker:
         db.connect(load_vss=self.load_vss)
         db.initialize_schema(embedding_dim=model.dimension, model_id=model.model_name)
         self.set_index_status(db.status())
-        if db._config("index_state") == "reindex_required":
+        if db._config("index_state") in {"reindex_required", "reindex_failed"}:
             self.set_state("reindex_required")
         else:
             self.set_state("ready")
@@ -254,7 +259,8 @@ class DaemonWorker:
             self.ready.set()
             # Reconcile changes made while the daemon was stopped without delaying
             # endpoint publication or MCP capability discovery.
-            self.jobs.put(("sync", {}, None))
+            if self.snapshot()["state"] != "reindex_required":
+                self.jobs.put(("sync", {}, None))
             while True:
                 job = self.jobs.get()
                 if job is None:

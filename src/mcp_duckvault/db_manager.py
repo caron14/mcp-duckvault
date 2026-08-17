@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PARSER_VERSION = "1"
 CHUNKER_VERSION = "headers-h1-h3-v1"
 GRAPH_EXTRACTOR_VERSION = "1"
@@ -120,6 +120,178 @@ class DatabaseManager:
             [key, str(value)],
         )
 
+    def delete_config(self, key: str) -> None:
+        assert self.conn is not None
+        self.conn.execute("DELETE FROM system_config WHERE key = ?", [key])
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        assert self.conn is not None
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = ? AND column_name = ?",
+                [table, column],
+            ).fetchone()
+            is not None
+        )
+
+    def _migration_backup(self, from_version: int, to_version: int) -> Path | None:
+        """Checkpoint and copy a file database before changing its schema."""
+        if self.db_path == ":memory:":
+            return None
+        assert self.conn is not None
+        had_vss = self._vss_loaded
+        self.conn.execute("CHECKPOINT")
+        self.close()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        source = Path(self.db_path).expanduser().resolve()
+        destination = (
+            source.parent / "backups" / f"schema-v{from_version}-to-v{to_version}-{stamp}.db"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(source, destination)
+        try:
+            destination.chmod(0o600)
+        except OSError:
+            pass
+        self.connect(load_vss=had_vss)
+        return destination
+
+    def _apply_migration(self, from_version: int, embedding_dim: int) -> None:
+        """Apply exactly one schema migration inside the caller's transaction."""
+        assert self.conn is not None
+        if from_version == 0:
+            if self._table_exists("documents"):
+                self.conn.execute(
+                    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS " "source_modified_at TIMESTAMP"
+                )
+                self.conn.execute(
+                    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_signature VARCHAR"
+                )
+            return
+        if from_version == 1:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMP NOT NULL
+                )
+            """)
+            return
+        raise DuckVaultError(
+            "SCHEMA_UNSUPPORTED",
+            f"No migration exists from database schema {from_version}.",
+        )
+
+    def _migrate_schema(self, from_version: int, embedding_dim: int) -> Path | None:
+        """Back up and transactionally migrate an older supported schema."""
+        assert self.conn is not None
+        backup = self._migration_backup(from_version, SCHEMA_VERSION)
+        assert self.conn is not None
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            for version in range(from_version, SCHEMA_VERSION):
+                self._apply_migration(version, embedding_dim)
+                self.set_config("schema_version", version + 1)
+                if self._table_exists("schema_migrations"):
+                    self.conn.execute(
+                        "INSERT INTO schema_migrations VALUES (?, CURRENT_TIMESTAMP) "
+                        "ON CONFLICT (version) DO NOTHING",
+                        [version + 1],
+                    )
+            self.conn.execute("COMMIT")
+        except Exception as exc:
+            self.conn.execute("ROLLBACK")
+            raise DuckVaultError(
+                "MIGRATION_FAILED",
+                f"Database migration from schema {from_version} failed; "
+                f"the original database is unchanged and its backup is {backup}.",
+                retryable=True,
+            ) from exc
+        return backup
+
+    def _ensure_latest_tables(self, embedding_dim: int) -> None:
+        assert self.conn is not None
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                path VARCHAR PRIMARY KEY,
+                md5 VARCHAR,
+                metadata JSON,
+                source_modified_at TIMESTAMP,
+                index_signature VARCHAR,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.conn.execute(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_modified_at TIMESTAMP"
+        )
+        self.conn.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_signature VARCHAR")
+        self.conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS chunks (
+                chunk_id VARCHAR PRIMARY KEY,
+                document_path VARCHAR,
+                content TEXT,
+                embedding FLOAT[{embedding_dim}],
+                metadata JSON
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                node_id VARCHAR PRIMARY KEY,
+                node_type VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                document_path VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS edges (
+                edge_id VARCHAR PRIMARY KEY,
+                source_node_id VARCHAR NOT NULL,
+                target_node_id VARCHAR NOT NULL,
+                edge_type VARCHAR NOT NULL,
+                weight DOUBLE DEFAULT 1.0,
+                document_path VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS node_mentions (
+                mention_id VARCHAR PRIMARY KEY,
+                node_id VARCHAR NOT NULL,
+                chunk_id VARCHAR,
+                document_path VARCHAR NOT NULL,
+                mention_text VARCHAR,
+                metadata JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS edge_nodes_idx ON edges (source_node_id, target_node_id);
+            CREATE INDEX IF NOT EXISTS edge_document_idx ON edges (document_path);
+            CREATE INDEX IF NOT EXISTS node_document_idx ON nodes (document_path);
+            CREATE INDEX IF NOT EXISTS mention_node_chunk_idx ON node_mentions (node_id, chunk_id);
+            CREATE INDEX IF NOT EXISTS mention_document_idx ON node_mentions (document_path);
+            CREATE TABLE IF NOT EXISTS sync_runs (
+                run_id VARCHAR PRIMARY KEY,
+                status VARCHAR NOT NULL,
+                scanned BIGINT NOT NULL,
+                indexed BIGINT NOT NULL,
+                skipped BIGINT NOT NULL,
+                deleted BIGINT NOT NULL,
+                failed BIGINT NOT NULL,
+                excluded BIGINT NOT NULL,
+                started_at TIMESTAMP NOT NULL,
+                finished_at TIMESTAMP NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sync_failures (
+                path VARCHAR PRIMARY KEY,
+                error_code VARCHAR NOT NULL,
+                error_type VARCHAR NOT NULL,
+                occurred_at TIMESTAMP NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP NOT NULL
+            )
+        """)
+
     def verify_vault_identity(self, *, require_present: bool = True) -> None:
         """Reject a database belonging to a different or legacy Vault."""
         if self.identity is None:
@@ -170,6 +342,8 @@ class DatabaseManager:
             self.set_config("created_at", datetime.now(timezone.utc).isoformat())
         self.verify_vault_identity(require_present=self.identity is not None)
         stored_schema = self._config("schema_version")
+        new_database = not self._table_exists("documents") and stored_schema is None
+        parsed_schema = SCHEMA_VERSION if new_database else 0
         if stored_schema is not None:
             try:
                 parsed_schema = int(stored_schema)
@@ -182,86 +356,10 @@ class DatabaseManager:
                     "SCHEMA_UNSUPPORTED",
                     f"Database schema {parsed_schema} is newer than supported {SCHEMA_VERSION}.",
                 )
-
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                path VARCHAR PRIMARY KEY,
-                md5 VARCHAR,
-                metadata JSON,
-                source_modified_at TIMESTAMP,
-                index_signature VARCHAR,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Upgrade databases created by v0.3 before version metadata existed.
-        self.conn.execute(
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_modified_at TIMESTAMP"
-        )
-        self.conn.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_signature VARCHAR")
-        self.conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS chunks (
-                chunk_id VARCHAR PRIMARY KEY,
-                document_path VARCHAR,
-                content TEXT,
-                embedding FLOAT[{embedding_dim}],
-                metadata JSON
-            )
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS nodes (
-                node_id VARCHAR PRIMARY KEY,
-                node_type VARCHAR NOT NULL,
-                name VARCHAR NOT NULL,
-                document_path VARCHAR,
-                metadata JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS edges (
-                edge_id VARCHAR PRIMARY KEY,
-                source_node_id VARCHAR NOT NULL,
-                target_node_id VARCHAR NOT NULL,
-                edge_type VARCHAR NOT NULL,
-                weight DOUBLE DEFAULT 1.0,
-                document_path VARCHAR,
-                metadata JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS node_mentions (
-                mention_id VARCHAR PRIMARY KEY,
-                node_id VARCHAR NOT NULL,
-                chunk_id VARCHAR,
-                document_path VARCHAR NOT NULL,
-                mention_text VARCHAR,
-                metadata JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS edge_nodes_idx ON edges (source_node_id, target_node_id);
-            CREATE INDEX IF NOT EXISTS edge_document_idx ON edges (document_path);
-            CREATE INDEX IF NOT EXISTS node_document_idx ON nodes (document_path);
-            CREATE INDEX IF NOT EXISTS mention_node_chunk_idx ON node_mentions (node_id, chunk_id);
-            CREATE INDEX IF NOT EXISTS mention_document_idx ON node_mentions (document_path)
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS sync_runs (
-                run_id VARCHAR PRIMARY KEY,
-                status VARCHAR NOT NULL,
-                scanned BIGINT NOT NULL,
-                indexed BIGINT NOT NULL,
-                skipped BIGINT NOT NULL,
-                deleted BIGINT NOT NULL,
-                failed BIGINT NOT NULL,
-                excluded BIGINT NOT NULL,
-                started_at TIMESTAMP NOT NULL,
-                finished_at TIMESTAMP NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sync_failures (
-                path VARCHAR PRIMARY KEY,
-                error_code VARCHAR NOT NULL,
-                error_type VARCHAR NOT NULL,
-                occurred_at TIMESTAMP NOT NULL
-            )
-        """)
+        migration_backup = None
+        if parsed_schema < SCHEMA_VERSION:
+            migration_backup = self._migrate_schema(parsed_schema, embedding_dim)
+        self._ensure_latest_tables(embedding_dim)
 
         if self._vss_loaded:
             try:
@@ -277,6 +375,7 @@ class DatabaseManager:
                 logger.warning("Could not create HNSW index (%s)", type(exc).__name__)
 
         previous_signature = self._config("index_signature")
+        previous_dimension = self._config("embedding_dimension")
         self.set_config("schema_version", SCHEMA_VERSION)
         self.set_config("parser_version", PARSER_VERSION)
         self.set_config("chunker_version", CHUNKER_VERSION)
@@ -284,7 +383,13 @@ class DatabaseManager:
         self.set_config("embedding_model_id", model_id)
         self.set_config("embedding_dimension", embedding_dim)
         self.set_config("index_signature", signature)
-        if previous_signature and previous_signature != signature:
+        if migration_backup:
+            self.set_config("last_migration_backup", migration_backup)
+        signature_changed = previous_signature is not None and previous_signature != signature
+        dimension_changed = (
+            previous_dimension is not None and int(previous_dimension) != embedding_dim
+        )
+        if signature_changed or dimension_changed:
             self.set_config("index_state", "reindex_required")
         elif not self._config("index_state"):
             self.set_config("index_state", "ready")
@@ -318,7 +423,9 @@ class DatabaseManager:
                 summary.finished_at,
             ],
         )
-        self.set_config("index_state", "ready" if summary.status == "complete" else "degraded")
+        current_state = self._config("index_state")
+        if current_state not in {"reindex_required", "reindex_failed"}:
+            self.set_config("index_state", "ready" if summary.status == "complete" else "degraded")
 
     def status(self, *, failure_limit: int = 100) -> dict[str, object]:
         assert self.conn is not None
@@ -349,6 +456,19 @@ class DatabaseManager:
             "vault_id": self._config("vault_id"),
             "vault_path": self._config("vault_path"),
             "schema_version": self._config("schema_version"),
+            "reindex": {
+                "required": (self._config("index_state") or "unknown")
+                in {"reindex_required", "reindex_failed"},
+                "current_signature": self._config("index_signature"),
+                "last_error": self._config("last_reindex_error"),
+                "backup": self._config("last_reindex_backup"),
+                "repair": (
+                    f"duckvault reindex {self._config('vault_path')}"
+                    if (self._config("index_state") or "unknown")
+                    in {"reindex_required", "reindex_failed"}
+                    else None
+                ),
+            },
             "last_sync": sync,
             "failures": [
                 {

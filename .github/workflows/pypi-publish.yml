@@ -9,6 +9,7 @@ jobs:
   build-n-publish:
     name: Build and publish Python 🐍 distributions 📦 to PyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       id-token: write
       contents: read
@@ -38,10 +39,23 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run pytest -vv --durations=20
+
+      - name: Run VSS smoke test
+        run: uv run pytest -m vss -vv
 
       - name: Build distributions
         run: uv build
+
+      - name: Test clean wheel CLI
+        shell: bash
+        run: |
+          wheel_path="$(find dist -name '*.whl' -print -quit)"
+          smoke_env="${RUNNER_TEMP}/duckvault-wheel-smoke"
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" "$wheel_path"
+          uv run python .github/scripts/wheel_smoke.py \
+            "$smoke_env/bin/duckvault" "$(uv version --short)"
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

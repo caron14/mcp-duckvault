@@ -198,8 +198,8 @@ Markdown bodies. A versioned JSON sidecar is generated beside it.
 ```bash
 uv sync --all-extras
 uv run pytest
-uv run black --check src tests
-uv run isort --check-only src tests
+uv run black --check src tests .github/scripts
+uv run isort --check-only src tests .github/scripts
 ```
 
 CI runs pytest on Python 3.11–3.14 on Linux and representative macOS/Windows

@@ -67,5 +67,8 @@ jobs:
         shell: bash
         run: |
           wheel_path="$(find dist -name '*.whl' -print -quit)"
-          uvx --from "$wheel_path" duckvault --help
-          uvx --from "$wheel_path" duckvault --version
+          smoke_env="${RUNNER_TEMP}/duckvault-wheel-smoke"
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" "$wheel_path"
+          uv run python .github/scripts/wheel_smoke.py \
+            "$smoke_env/bin/duckvault" "$(uv version --short)"

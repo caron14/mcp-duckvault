@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -136,7 +137,14 @@ def init_command(
     """Prepare VSS/model, create the DB, sync, and generate MCP configuration."""
     del non_interactive  # Initialization is deterministic; destructive choices are separate commands.
     try:
-        _emit(_initialize_vault(str(vault_path), custom_db_path=db_path), json_output)
+        result = _initialize_vault(str(vault_path), custom_db_path=db_path)
+        _emit(result, json_output)
+        if result["status"] == "partial":
+            raise click.exceptions.Exit(2)
+        if result["status"] == "failed":
+            raise click.exceptions.Exit(1)
+    except click.exceptions.Exit:
+        raise
     except Exception as exc:
         _fail(exc, json_output)
 
@@ -206,6 +214,7 @@ def status_command(vault_path: Path, db_path: str | None, json_output: bool) -> 
 def _doctor_checks(layout: VaultLayout, selected_db: str) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
     daemon_status_result: dict[str, object] | None = None
+    database_status: dict[str, object] | None = None
 
     def add(code: str, ok: bool, detail: str, repair: str | None = None) -> None:
         checks.append({"code": code, "ok": ok, "detail": detail, "repair": repair})
@@ -271,6 +280,7 @@ def _doctor_checks(layout: VaultLayout, selected_db: str) -> list[dict[str, obje
         add("WATCHER", True, "stopped with daemon")
 
     if daemon_status_result is not None:
+        database_status = daemon_status_result
         actual_db = daemon_status_result.get("db_path")
         database_matches = (
             actual_db is None or Path(str(actual_db)) == Path(selected_db).expanduser().resolve()
@@ -311,6 +321,7 @@ def _doctor_checks(layout: VaultLayout, selected_db: str) -> list[dict[str, obje
             db.connect(load_vss=False)
             db.verify_vault_identity()
             db.conn.execute("SELECT 1").fetchone()
+            database_status = db.status(failure_limit=0)
             db.close()
             add("DATABASE", True, selected_db)
             add("VAULT_IDENTITY", True, layout.identity.vault_id)
@@ -327,6 +338,15 @@ def _doctor_checks(layout: VaultLayout, selected_db: str) -> list[dict[str, obje
                 type(exc).__name__,
                 f"duckvault migrate-legacy {layout.identity.normalized_path}",
             )
+    if database_status is not None:
+        reindex = database_status.get("reindex") or {}
+        required = bool(reindex.get("required"))
+        add(
+            "REINDEX_READY",
+            not required,
+            str(database_status.get("index_state", "unknown")),
+            str(reindex.get("repair")) if required else None,
+        )
     return checks
 
 
@@ -379,6 +399,117 @@ def migrate_legacy_command(vault_path: Path, legacy_db: Path, json_output: bool)
         result["legacy_backup"] = str(backup)
         result["legacy_source_preserved"] = str(legacy_db)
         _emit(result, json_output)
+    except Exception as exc:
+        _fail(exc, json_output)
+
+
+def _ensure_daemon_stopped(layout: VaultLayout) -> None:
+    try:
+        DaemonClient(layout, timeout=0.5).health()
+    except DuckVaultError as exc:
+        if exc.code in {"DAEMON_NOT_RUNNING", "DAEMON_UNREACHABLE"}:
+            return
+        raise
+    raise DuckVaultError(
+        "DAEMON_RUNNING",
+        f"Stop the daemon before rebuilding: duckvault daemon stop "
+        f"{layout.identity.normalized_path}",
+    )
+
+
+def _reindex_vault(
+    vault_path: str,
+    *,
+    custom_db_path: str | None = None,
+    model: EmbeddingModel | None = None,
+    load_vss: bool = True,
+) -> dict[str, object]:
+    """Build a replacement database and atomically install it only on success."""
+    layout = VaultLayout.for_vault(vault_path, create=True)
+    _ensure_daemon_stopped(layout)
+    selected_db = Path(_db_path(layout, custom_db_path)).expanduser().resolve()
+    if not selected_db.exists():
+        raise DuckVaultError("NOT_INITIALIZED", "Vault has not been initialized.")
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = layout.backups_dir / f"reindex-{stamp}.db"
+    original = DatabaseManager(str(selected_db), identity=layout.identity)
+    original.connect(load_vss=False)
+    original.verify_vault_identity()
+    original.backup(backup)
+
+    replacement_path = selected_db.with_name(f".{selected_db.name}.reindex-{uuid.uuid4().hex}.tmp")
+    replacement: DatabaseManager | None = None
+    try:
+        os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(model_cache_path())
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        offline_model = model or EmbeddingModel(allow_download=False)
+        replacement = DatabaseManager(str(replacement_path), identity=layout.identity)
+        replacement.connect(load_vss=load_vss)
+        replacement.initialize_schema(
+            embedding_dim=offline_model.dimension,
+            model_id=offline_model.model_name,
+        )
+        summary = VaultIndexer(
+            str(layout.identity.normalized_path), replacement, model=offline_model
+        ).full_sync()
+        if summary.status != "complete":
+            raise DuckVaultError(
+                "REINDEX_PARTIAL",
+                f"Replacement index has {summary.failed} failed file(s).",
+                retryable=True,
+            )
+        replacement.set_config("index_state", "ready")
+        replacement.set_config("last_reindex_backup", backup)
+        replacement.delete_config("last_reindex_error")
+        replacement.conn.execute("CHECKPOINT")
+        replacement.close()
+        replacement = None
+        os.replace(replacement_path, selected_db)
+        safe_database_permissions(selected_db)
+        return {
+            "status": "complete",
+            "database": str(selected_db),
+            "backup": str(backup),
+            "sync": summary.as_dict(),
+        }
+    except Exception as exc:
+        if replacement is not None:
+            replacement.close()
+        recovery = DatabaseManager(str(selected_db), identity=layout.identity)
+        try:
+            recovery.connect(load_vss=False)
+            recovery.set_config("index_state", "reindex_failed")
+            recovery.set_config("last_reindex_error", type(exc).__name__)
+            recovery.set_config("last_reindex_backup", backup)
+        finally:
+            recovery.close()
+        if isinstance(exc, DuckVaultError):
+            raise
+        raise DuckVaultError(
+            "REINDEX_FAILED",
+            f"Reindex failed; the original database is preserved and its backup is {backup}.",
+            retryable=True,
+        ) from exc
+    finally:
+        for temporary in (replacement_path, replacement_path.with_suffix(".tmp.wal")):
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+@main.command("reindex")
+@click.argument("vault_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--db-path", type=click.Path(dir_okay=False), help="Advanced custom DB path.")
+@click.option("--json", "json_output", is_flag=True)
+def reindex_command(vault_path: Path, db_path: str | None, json_output: bool) -> None:
+    """Safely rebuild a Vault index while retaining the previous database."""
+    try:
+        _emit(
+            _reindex_vault(str(vault_path), custom_db_path=db_path),
+            json_output,
+        )
     except Exception as exc:
         _fail(exc, json_output)
 

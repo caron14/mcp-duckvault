@@ -27,7 +27,6 @@ dependencies = [
     "duckdb>=1.5.1",
     "filelock>=3.18.0",
     "mcp[cli]>=1.27.0,<2",
-    "pandas>=3.0.2",
     "pyyaml>=6.0.3",
     "sentence-transformers>=5.4.0",
     "tqdm>=4.66.0",
@@ -74,5 +73,7 @@ packages = ["src/mcp_duckvault"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
+    "/AGENTS.md",
     "/CLAUDE.md",
+    "/IMPLEMENTATION_PLAN.md",
 ]
