@@ -7,12 +7,16 @@ class DuckVaultError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.code = code
+        self.message = message
         self.retryable = retryable
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.message}"
 
     def as_dict(self) -> dict[str, object]:
         return {
             "code": self.code,
-            "message": str(self),
+            "message": self.message,
             "retryable": self.retryable,
         }
 

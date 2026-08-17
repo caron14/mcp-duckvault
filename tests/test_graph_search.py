@@ -48,14 +48,23 @@ def test_graph_and_hybrid_mcp_tools(tmp_path, database_factory):
 
     async def call(name, arguments):
         _, structured = await server.call_tool(name, arguments)
-        return structured["result"]
+        return structured
 
     async def verify():
-        assert "orders.md" in await call("search_notes", {"query": "orders"})
-        assert "customers.md" in await call("find_related_notes", {"path": "orders.md"})
-        assert "HAS_TYPE" in await call("list_graph_neighbors", {"path": "orders.md"})
-        assert "Graph:" in await call("hybrid_search_notes", {"query": "orders"})
-        assert "Orders" in await call("search_okf_concepts", {"okf_type": "table"})
-        assert "customers.md" in await call("explain_okf_concept", {"concept_id": "orders"})
+        search = await call("search_notes", {"query": "orders"})
+        assert {item["path"] for item in search["items"]} == {"orders.md", "customers.md"}
+        related = await call("find_related_notes", {"path": "orders.md"})
+        assert "customers.md" in {item["document_path"] for item in related["items"]}
+        neighbors = await call("list_graph_neighbors", {"path": "orders.md"})
+        assert "HAS_TYPE" in {item["edge_type"] for item in neighbors["items"]}
+        hybrid = await call("hybrid_search_notes", {"query": "orders"})
+        assert all("score" in item for item in hybrid["items"])
+        concepts = await call("search_okf_concepts", {"okf_type": "table"})
+        assert [item["title"] for item in concepts["items"]] == ["Orders"]
+        explanation = await call("explain_okf_concept", {"concept_id": "orders"})
+        relationships = (
+            explanation["items"][0]["linked_concepts"] + explanation["items"][0]["related_notes"]
+        )
+        assert "customers.md" in {item["document_path"] for item in relationships}
 
     asyncio.run(verify())

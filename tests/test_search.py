@@ -3,6 +3,8 @@
 import json
 import urllib.parse
 
+from mcp_duckvault.mcp_server import _vector_search
+
 
 def test_tag_filtering_logic(database_factory):
     """Tests the SQL logic for filtering documents by tags in various formats."""
@@ -32,21 +34,7 @@ def test_tag_filtering_logic(database_factory):
         )
 
     def search_with_tag(tag):
-        sql = """
-            SELECT d.path
-            FROM documents d
-            WHERE (
-                json_contains(d.metadata->'$.tags', ?) OR 
-                json_contains(d.metadata->'$.tag', ?) OR
-                CAST(d.metadata->>'$.tags' AS VARCHAR) = ? OR
-                CAST(d.metadata->>'$.tag' AS VARCHAR) = ? OR
-                contains(CAST(d.metadata->>'$.tags' AS VARCHAR), ?) OR
-                contains(CAST(d.metadata->>'$.tag' AS VARCHAR), ?)
-            )
-        """
-        tag_json = json.dumps(tag)
-        params = [tag_json, tag_json, tag, tag, tag, tag]
-        return [row[0] for row in db.conn.execute(sql, params).fetchall()]
+        return [row["path"] for row in _vector_search(db.conn, [0.1] * 384, tag=tag, limit=100)]
 
     assert "path1.md" in search_with_tag("work")
     assert "path2.md" in search_with_tag("personal")
@@ -54,6 +42,16 @@ def test_tag_filtering_logic(database_factory):
     assert "path3.md" in search_with_tag("urgent")
     assert "path4.md" in search_with_tag("home")
     assert "path1.md" not in search_with_tag("personal")
+
+    db.conn.execute(
+        "INSERT INTO documents (path, md5, metadata) VALUES (?, ?, ?)",
+        ("substring.md", "hash", json.dumps({"tags": ["homework"]})),
+    )
+    db.conn.execute(
+        "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
+        ("substring", "substring.md", "content", [0.1] * 384, "{}"),
+    )
+    assert "substring.md" not in search_with_tag("home")
 
 
 def test_obsidian_uri_generation():
