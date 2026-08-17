@@ -84,8 +84,9 @@ jobs:
           offline_env="${RUNNER_TEMP}/duckvault-offline-e2e"
           offline_root="${RUNNER_TEMP}/duckvault-offline-root"
           vault="${offline_root}/vault"
+          runner_home="${HOME}"
           sudo --preserve-env=DUCKVAULT_HOME,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
-            env DUCKVAULT_HOME="${offline_root}/home" HF_HUB_OFFLINE=1 \
+            env HOME="${runner_home}" DUCKVAULT_HOME="${offline_root}/home" HF_HUB_OFFLINE=1 \
             TRANSFORMERS_OFFLINE=1 unshare --net -- \
             bash -c 'ip link set lo up; exec "$1" "$2" "$3"' bash \
             "$offline_env/bin/python" .github/scripts/offline_search_smoke.py "$vault"

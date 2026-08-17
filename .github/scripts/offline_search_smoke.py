@@ -21,7 +21,17 @@ def main() -> None:
     assert not torch.cuda.is_available()
 
     layout = VaultLayout.for_vault(vault)
-    client = ensure_daemon(layout, timeout=30)
+    try:
+        client = ensure_daemon(layout, timeout=30)
+    except Exception:
+        try:
+            daemon_log = layout.daemon_log_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Could not read daemon log: {exc}", file=sys.stderr)
+        else:
+            print("--- daemon.log ---", file=sys.stderr)
+            print(daemon_log, file=sys.stderr)
+        raise
     try:
         result = client.call("tool:search_notes", {"query": "offline release smoke"})
         assert result["schema_version"] == "1.0"
